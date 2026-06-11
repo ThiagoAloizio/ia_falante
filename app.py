@@ -49,12 +49,67 @@ def load_yolo():
 yolo_model = load_yolo()
 
 def obter_frase_criativa(lista_objetos):
-    itens_formatados = ", ".join(lista_objetos)
+    # Dicionário de tradução para os objetos mais comuns do YOLOv8 em uma casa
+    traducoes = {
+        "person": "pessoa",
+        "bicycle": "bicicleta",
+        "car": "carro",
+        "motorcycle": "moto",
+        "backpack": "mochila",
+        "umbrella": "guarda-chuva",
+        "handbag": "bolsa",
+        "tie": "gravata",
+        "suitcase": "mala",
+        "bottle": "garrafa",
+        "wine glass": "taça de vinho",
+        "cup": "copo",
+        "fork": "garfo",
+        "knife": "faca",
+        "spoon": "colher",
+        "bowl": "tigela",
+        "banana": "banana",
+        "apple": "maçã",
+        "sandwich": "sanduíche",
+        "orange": "laranja",
+        "broccoli": "brócolis",
+        "carrot": "cenoura",
+        "hot dog": "cachorro-quente",
+        "pizza": "pizza",
+        "donut": "donut",
+        "cake": "bolo",
+        "chair": "cadeira",
+        "couch": "sofá",
+        "potted plant": "vaso de planta",
+        "bed": "cama",
+        "dining table": "mesa de jantar",
+        "tv": "televisão",
+        "laptop": "notebook",
+        "mouse": "mouse",
+        "remote": "controle remoto",
+        "keyboard": "teclado",
+        "cell phone": "celular",
+        "microwave": "micro-ondas",
+        "oven": "forno",
+        "toaster": "torradeira",
+        "sink": "pia",
+        "refrigerator": "geladeira",
+        "book": "livro",
+        "clock": "relógio",
+        "vase": "vaso",
+        "scissors": "tesoura",
+        "teddy bear": "ursinho de pelúcia",
+        "hair drier": "secador de cabelo",
+        "toothbrush": "escova de dentes"
+    }
+
+    # Traduz os objetos detectados. Se não estiver no dicionário, mantém o nome original
+    itens_traduzidos = [traducoes.get(obj, obj) for obj in lista_objetos]
+    itens_formatados = ", ".join(itens_traduzidos)
     
-    # 1. Banco de frases criativas para servir de Fallback caso o Gemini esteja sem cota
+    # Banco de frases locais (Fallback) totalmente em português
     saudacoes_locais = [
         f"Seja muito bem-vindo de volta! Que ótimo que você chegou trazendo seu {itens_formatados}. Pode deixar tudo na entrada e ir descansar um pouco.",
-        f"Olha só quem chegou! Vejo que trouxe {itens_formatados} com você hoje. Sinta-se em casa, tire os sapatos e aproveite o resto do seu dia.",
+        f"Olha só quem chegou! Vejo que trouxe um {itens_formatados} com você hoje. Sinta-se em casa, tire os sapatos e aproveite o resto do seu dia.",
         f"Olá, que bom ver você! Muito interessante você estar com seu {itens_formatados} agora. Entre e fique totalmente à vontade."
     ]
     
@@ -67,7 +122,6 @@ def obter_frase_criativa(lista_objetos):
     Proibição: Não faça nenhuma pergunta no final e não utilize pontos de interrogação.
     """
     
-    # 2. Tenta chamar a API do Gemini de forma segura
     try:
         resposta = client.models.generate_content(
             model='gemini-2.5-flash',
@@ -79,10 +133,8 @@ def obter_frase_criativa(lista_objetos):
             return resposta.candidates[0].content.parts[0].text.strip()
             
     except Exception as e:
-        # Se cair aqui por erro de cota (429/Quota Exceeded), avisa discretamente e usa o fallback
-        st.sidebar.warning("⚠️ API do Gemini sem cota temporariamente. Usando gerador local.")
-        
-        # Retorna uma frase aleatória bem estruturada com o nome do objeto detectado pelo YOLO
+        # Se a API falhar por cota, o fallback local agora usará os itens traduzidos!
+        st.sidebar.warning("⚠️ API do Gemini sem cota temporariamente. Usando gerador local traduzido.")
         return random.choice(saudacoes_locais)
 
 def gerar_audio_gtts(texto, nome_arquivo):
