@@ -58,23 +58,22 @@ def obter_frase_criativa(lista_objetos):
     Regra crucial: Faça um comentário detalhado, desenvolva bem o assunto sobre os itens trazidos e conclua com uma afirmação acolhedora. Escreva um parágrafo completo. Devolva APENAS o texto a ser falado.
     Proibição: Não faça nenhuma pergunta no final e não utilize pontos de interrogação.
     """
-    tentativas = 3
-    for i in range(tentativas):
-        try:
-            resposta = client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=prompt
-            )
-            if resposta.text:
-                return resposta.text.strip()
-            elif hasattr(resposta, 'candidates') and resposta.candidates:
-                return resposta.candidates[0].content.parts[0].text.strip()
-        except Exception as e:
-            # Mantém o erro visível na tela sem sumir
-            st.error(f"Erro na chamada do Gemini: {e}")
-            if i == tentativas - 1:
-                return f"Olá! Que bom que você chegou trazendo isso. Seja bem-vindo de volta! Sinta-se em casa."
-            time.sleep(1)
+    try:
+        # Força a chamada do Gemini
+        resposta = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt
+        )
+        if resposta.text:
+            return resposta.text.strip()
+        elif hasattr(resposta, 'candidates') and resposta.candidates:
+            return resposta.candidates[0].content.parts[0].text.strip()
+            
+    except Exception as e:
+        # 🚨 TRAVA DE DIAGNÓSTICO: Para o app e joga o erro na tela sem sumir!
+        st.error("❌ O GEMINI FALHOU! DETALHES DO ERRO ABAIXO:")
+        st.exception(e)
+        st.stop() # Impede o autorefresh de atualizar a página e sumir com o erro
 
 def gerar_audio_gtts(texto, nome_arquivo):
     try:
