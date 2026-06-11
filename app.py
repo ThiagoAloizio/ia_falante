@@ -133,7 +133,6 @@ with col1:
     webrtc_streamer(
         key="ia-boas-vindas",
         video_processor_factory=lambda: VideoProcessor(objeto_queue, memoria_global_objetos, contexto_atual),
-        rtc_configuration={"iceServers": [{"urls": "stun:://google.com"}]},
         media_stream_constraints={"video": True, "audio": False},
     )
 
