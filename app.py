@@ -116,7 +116,15 @@ class VideoProcessor(VideoProcessorBase):
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
+# =====================================================================
 # 4. Interface Gráfica Web (Layout de duas colunas)
+# =====================================================================
+from streamlit_autorefresh import st_autorefresh
+
+# Atualiza a interface silenciosamente a cada 1000ms (1 segundo) 
+# Isso força o Streamlit a ler a fila de objetos sem travar o WebRTC
+st_autorefresh(interval=1000, key="atualizador_fila")
+
 col1, col2 = st.columns(2)
 
 with col1:
@@ -141,7 +149,7 @@ with col2:
         st.success("Memória limpa!")
         st.rerun()
 
-    # Verifica se a fila recebeu novos dados do processador de vídeo
+    # Agora o app vai conseguir entrar aqui porque a página se atualiza a cada 1 segundo
     if not objeto_queue.empty():
         itens_detectados = objeto_queue.get()
         
@@ -151,7 +159,6 @@ with col2:
             
             nome_arquivo = f"resposta_{int(time.time())}.mp3"
             
-            # Executa a geração do gTTS sem travar ou precisar de loop assíncrono
             if gerar_audio_gtts(frase, nome_arquivo):
                 st.session_state["arquivo_audio"] = nome_arquivo
                 st.session_state["tocar_audio"] = True
@@ -166,8 +173,4 @@ with col2:
     if st.session_state["tocar_audio"] and st.session_state["arquivo_audio"]:
         if os.path.exists(st.session_state["arquivo_audio"]):
             st.audio(st.session_state["arquivo_audio"], format="audio/mp3", autoplay=True)
-            # Desativa o gatilho para não rodar em loop na próxima renderização
             st.session_state["tocar_audio"] = False
-
-# Removemos o loop agressivo do final. O próprio webrtc_streamer e as interações do usuário
-# cuidam das atualizações sem quebrar as threads internas do Streamlit.
