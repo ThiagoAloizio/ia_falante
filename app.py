@@ -16,14 +16,14 @@ st.title("🤖 IA de Boas-Vindas Contextual com YOLOv8 e Gemini")
 # Silencia logs do OpenCV
 os.environ["QT_LOGGING_RULES"] = "*.debug=false;*.info=false;*.warning=false"
 
-# 1. Recursos Globais Estáticos Persistentes
+# 1. Recursos Globais Estáticos Persistentes em Cache (Evita perda de dados entre recarregamentos)
 @st.cache_resource
 def obter_recursos_globais():
     return set(), Queue()
 
 memoria_global_objetos, objeto_queue = obter_recursos_globais()
 
-# Inicialização estável das variáveis de controle
+# Inicialização estável das variáveis de controle na sessão do navegador
 if "texto_ia" not in st.session_state:
     st.session_state["texto_ia"] = ""
 if "tocar_audio" not in st.session_state:
@@ -100,6 +100,7 @@ class VideoProcessor(VideoProcessorBase):
             self.tempo_visto_com_objetos += dt
             if self.tempo_visto_com_objetos > 2.0:
                 self.memoria_objetos.update(itens_novos)
+                # Adiciona na fila segura
                 self.queue_comunicacao.put(itens_novos)
                 self.tempo_visto_com_objetos = 0
         else:
@@ -112,7 +113,7 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("📷 Feed de Vídeo em Tempo Real")
-    webrtc_streamer(
+    ctx = webrtc_streamer(
         key="ia-boas-vindas",
         video_processor_factory=lambda: VideoProcessor(memoria_global_objetos, objeto_queue),
         media_stream_constraints={"video": True, "audio": False},
@@ -133,7 +134,7 @@ with col2:
         st.success("Memória limpa!")
         st.rerun()
 
-    # 5. Monitoramento de Fila Síncrono e Seguro
+    # 5. Processamento Síncrono e Seguro disparado pela Fila (SEM loops de autorefresh)
     if not objeto_queue.empty():
         itens_detectados = objeto_queue.get()
         
@@ -141,27 +142,23 @@ with col2:
             frase = obter_frase_criativa(itens_detectados)
             st.session_state["texto_ia"] = frase
             
-            # Sobrescreve sempre um arquivo com nome fixo e estavel
             nome_arquivo = "resposta_estavel.mp3"
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             loop.run_until_complete(gerar_audio_edge(frase, nome_arquivo))
             loop.close()
             
-            # Ativa a flag de exibição do player de som
             st.session_state["tocar_audio"] = True
+        
+        # Força uma única atualização limpa na tela após processar o Gemini
+        st.rerun()
 
-    # Renderiza o texto gerado de forma estática (Evita sumiços)
+    # Exibe o texto explicativo de forma estável na tela (sem piscar)
     if st.session_state["texto_ia"]:
         st.info(st.session_state["texto_ia"])
     else:
         st.write("Aguardando detecção de novos objetos...")
 
-    # Se a flag estiver ativa, renderiza o componente nativo estável com autoplay do navegador
+    # Se houver áudio pronto, renderiza o player nativo do navegador
     if st.session_state["tocar_audio"] and os.path.exists("resposta_estavel.mp3"):
         st.audio("resposta_estavel.mp3", format="audio/mp3", autoplay=True)
-        # Mantemos a flag ativa para o componente persistir na tela durante os ciclos de refresh
-
-# 6. Atualizador de interface (1 atualização por segundo)
-from streamlit_autorefresh import st_autorefresh
-st_autorefresh(interval=1000, key="atualizador_de_interface_nuvem")
