@@ -19,6 +19,7 @@ os.environ["QT_LOGGING_RULES"] = "*.debug=false;*.info=false;*.warning=false"
 # 1. Recursos Globais Estáticos Persistentes em Cache
 @st.cache_resource
 def obter_memoria_global():
+    # Inicializa uma única vez a memória de objetos e a fila de comunicação
     return set(), Queue()
 
 memoria_global_objetos, objeto_queue = obter_memoria_global()
@@ -28,8 +29,6 @@ if "texto_ia" not in st.session_state:
     st.session_state["texto_ia"] = ""
 if "tocar_audio" not in st.session_state:
     st.session_state["tocar_audio"] = False
-if "arquivo_audio" not in st.session_state:
-    st.session_state["arquivo_audio"] = ""
 
 # 2. Configuração Segura da API Key
 try:
@@ -63,7 +62,7 @@ def obter_frase_criativa(lista_objetos):
             )
             return resposta.text.strip()
         except Exception as e:
-            if i == tentatives - 1:
+            if i == tentativas - 1:
                 return "Olá! Que bom que você chegou. Seja bem-vindo de volta! Deixe suas coisas na entrada e fique à vontade para descansar."
             time.sleep(1.5)
 
@@ -71,7 +70,7 @@ async def gerar_audio_edge(texto, nome_arquivo):
     communicate = edge_tts.Communicate(texto, "pt-BR-FranciscaNeural")
     await communicate.save(nome_arquivo)
 
-# 3. Classe Processadora Nativa do WebRTC
+# 3. Classe Processadora Nativa do WebRTC (Sem dependência de contexto de UI)
 class VideoProcessor(VideoProcessorBase):
     def __init__(self, memoria_objetos, queue_comunicacao):
         self.memoria_objetos = memoria_objetos
@@ -95,11 +94,13 @@ class VideoProcessor(VideoProcessorBase):
                 nome_objeto = yolo_model.names[int(box.cls)]
                 objetos_no_frame.add(nome_objeto)
 
+        # Filtra pessoas e foca nos objetos trazidos
         itens_reais = [obj for obj in objetos_no_frame if obj != "person"]
         itens_novos = [item for item in itens_reais if item not in self.memoria_objetos]
 
         if itens_novos:
             self.tempo_visto_com_objetos += dt
+            # Se o objeto persistir por mais de 1.5 segundos (evita falsos positivos rápidos)
             if self.tempo_visto_com_objetos > 1.5:
                 self.memoria_objetos.update(itens_novos)
                 self.queue_comunicacao.put(itens_novos)
@@ -117,4 +118,59 @@ with col1:
     webrtc_streamer(
         key="ia-boas-vindas",
         video_processor_factory=lambda: VideoProcessor(memoria_global_objetos, objeto_queue),
-        media_stream_constraints
+        media_stream_constraints={"video": True, "audio": False},
+        async_processing=True
+    )
+
+with col2:
+    st.subheader("💬 Interação da Inteligência Artificial")
+    
+    if st.button("🔄 Limpar Memória de Objetos"):
+        memoria_global_objetos.clear()
+        st.session_state["texto_ia"] = ""
+        st.session_state["tocar_audio"] = False
+        while not objeto_queue.empty():
+            objeto_queue.get()
+        if os.path.exists("resposta_estavel.mp3"):
+            try: os.remove("resposta_estavel.mp3")
+            except: pass
+        st.success("Memória limpa!")
+        st.rerun()
+
+    # Fragmento de atualização /pooling para verificar se a fila recebeu dados da câmera
+    # Sem travar o vídeo
+    if not objeto_queue.empty():
+        itens_detectados = objeto_queue.get()
+        
+        with st.spinner("IA Pensando em uma interação..."):
+            frase = obter_frase_criativa(itens_detectados)
+            st.session_state["texto_ia"] = frase
+            
+            # Timestamp evita conflito de arquivos idênticos na nuvem
+            nome_arquivo = f"resposta_{int(time.time())}.mp3"
+            
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(gerar_audio_edge(frase, nome_arquivo))
+            loop.close()
+            
+            st.session_state["arquivo_audio"] = nome_arquivo
+            st.session_state["tocar_audio"] = True
+
+    # Renderiza o texto gerado
+    if st.session_state["texto_ia"]:
+        st.info(st.session_state["texto_ia"])
+    else:
+        st.write("Aguardando detecção de novos objetos no vídeo...")
+
+    # Se houver áudio pronto, renderiza o player nativo
+    if st.session_state["tocar_audio"] and "arquivo_audio" in st.session_state:
+        if os.path.exists(st.session_state["arquivo_audio"]):
+            st.audio(st.session_state["arquivo_audio"], format="audio/mp3", autoplay=True)
+            # Desativa para não entrar em loop infinito de áudio ao redesenhar a página
+            st.session_state["tocar_audio"] = False 
+
+    # Pequena automação para checar a fila a cada 2 segundos caso esteja vazia
+    if objeto_queue.empty():
+        time.sleep(2)
+        st.rerun()
