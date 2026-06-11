@@ -4,10 +4,9 @@ import av
 from ultralytics import YOLO
 from google import genai
 import time
-import asyncio
-import edge_tts
 import os
 from queue import Queue
+from gtts import gTTS
 
 # Configuração da página do Streamlit
 st.set_page_config(page_title="IA de Boas-Vindas Contextual", layout="wide")
@@ -29,6 +28,8 @@ if "texto_ia" not in st.session_state:
     st.session_state["texto_ia"] = ""
 if "tocar_audio" not in st.session_state:
     st.session_state["tocar_audio"] = False
+if "arquivo_audio" not in st.session_state:
+    st.session_state["arquivo_audio"] = ""
 
 # 2. Configuração Segura da API Key
 try:
@@ -66,11 +67,17 @@ def obter_frase_criativa(lista_objetos):
                 return "Olá! Que bom que você chegou. Seja bem-vindo de volta! Deixe suas coisas na entrada e fique à vontade para descansar."
             time.sleep(1.5)
 
-async def gerar_audio_edge(texto, nome_arquivo):
-    communicate = edge_tts.Communicate(texto, "pt-BR-FranciscaNeural")
-    await communicate.save(nome_arquivo)
+# Nova função de áudio usando gTTS (Síncrona, leve e sem problemas de IP no servidor)
+def gerar_audio_gtts(texto, nome_arquivo):
+    try:
+        tts = gTTS(text=texto, lang='pt', tld='com.br')
+        tts.save(nome_arquivo)
+        return True
+    except Exception as e:
+        st.error(f"Erro ao gerar áudio: {e}")
+        return False
 
-# 3. Classe Processadora Nativa do WebRTC (Sem dependência de contexto de UI)
+# 3. Classe Processadora Nativa do WebRTC
 class VideoProcessor(VideoProcessorBase):
     def __init__(self, memoria_objetos, queue_comunicacao):
         self.memoria_objetos = memoria_objetos
@@ -100,7 +107,6 @@ class VideoProcessor(VideoProcessorBase):
 
         if itens_novos:
             self.tempo_visto_com_objetos += dt
-            # Se o objeto persistir por mais de 1.5 segundos (evita falsos positivos rápidos)
             if self.tempo_visto_com_objetos > 1.5:
                 self.memoria_objetos.update(itens_novos)
                 self.queue_comunicacao.put(itens_novos)
@@ -129,16 +135,13 @@ with col2:
         memoria_global_objetos.clear()
         st.session_state["texto_ia"] = ""
         st.session_state["tocar_audio"] = False
+        st.session_state["arquivo_audio"] = ""
         while not objeto_queue.empty():
             objeto_queue.get()
-        if os.path.exists("resposta_estavel.mp3"):
-            try: os.remove("resposta_estavel.mp3")
-            except: pass
         st.success("Memória limpa!")
         st.rerun()
 
-    # Fragmento de atualização /pooling para verificar se a fila recebeu dados da câmera
-    # Sem travar o vídeo
+    # Verifica se a fila recebeu novos dados do processador de vídeo
     if not objeto_queue.empty():
         itens_detectados = objeto_queue.get()
         
@@ -146,31 +149,25 @@ with col2:
             frase = obter_frase_criativa(itens_detectados)
             st.session_state["texto_ia"] = frase
             
-            # Timestamp evita conflito de arquivos idênticos na nuvem
             nome_arquivo = f"resposta_{int(time.time())}.mp3"
             
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(gerar_audio_edge(frase, nome_arquivo))
-            loop.close()
-            
-            st.session_state["arquivo_audio"] = nome_arquivo
-            st.session_state["tocar_audio"] = True
+            # Executa a geração do gTTS sem travar ou precisar de loop assíncrono
+            if gerar_audio_gtts(frase, nome_arquivo):
+                st.session_state["arquivo_audio"] = nome_arquivo
+                st.session_state["tocar_audio"] = True
 
-    # Renderiza o texto gerado
+    # Renderiza o texto gerado da IA
     if st.session_state["texto_ia"]:
         st.info(st.session_state["texto_ia"])
     else:
         st.write("Aguardando detecção de novos objetos no vídeo...")
 
-    # Se houver áudio pronto, renderiza o player nativo
-    if st.session_state["tocar_audio"] and "arquivo_audio" in st.session_state:
+    # Se houver áudio pronto, renderiza o player nativo com autoplay
+    if st.session_state["tocar_audio"] and st.session_state["arquivo_audio"]:
         if os.path.exists(st.session_state["arquivo_audio"]):
             st.audio(st.session_state["arquivo_audio"], format="audio/mp3", autoplay=True)
-            # Desativa para não entrar em loop infinito de áudio ao redesenhar a página
-            st.session_state["tocar_audio"] = False 
+            # Desativa o gatilho para não rodar em loop na próxima renderização
+            st.session_state["tocar_audio"] = False
 
-    # Pequena automação para checar a fila a cada 2 segundos caso esteja vazia
-    if objeto_queue.empty():
-        time.sleep(2)
-        st.rerun()
+# Removemos o loop agressivo do final. O próprio webrtc_streamer e as interações do usuário
+# cuidam das atualizações sem quebrar as threads internas do Streamlit.
