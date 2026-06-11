@@ -5,3 +5,4 @@ ultralytics
 google-genai
 edge-tts
 opencv-python-headless
+streamlit-autorefresh
