@@ -85,7 +85,7 @@ def gerar_audio_gtts(texto, nome_arquivo):
         return False
 
 # =====================================================================
-# 3. Classe Processadora Nativa do WebRTC (Com Trava de Cota Integrada)
+# 3. Classe Processadora Nativa do WebRTC (Corrigida)
 # =====================================================================
 class VideoProcessor(VideoProcessorBase):
     def __init__(self, memoria_objetos, queue_comunicacao):
@@ -93,7 +93,7 @@ class VideoProcessor(VideoProcessorBase):
         self.queue_comunicacao = queue_comunicacao
         self.tempo_visto_com_objetos = 0
         self.ultimo_tempo = time.time()
-        self.ultima_requisicao_ia = 0  # Guarda o momento da última interação
+        self.ultima_requisicao_ia = 0  # Cronômetro contra spam na API
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
@@ -113,22 +113,24 @@ class VideoProcessor(VideoProcessorBase):
 
         # Filtra pessoas e foca nos objetos trazidos
         itens_reais = [obj for obj in objetos_no_frame if obj != "person"]
-        itens_novos = [item for item in itens_reais if item not in self.memoria_objetos]
 
-        # SÓ PERMITE ENVIAR PARA A IA SE JÁ PASSARAM 15 SEGUNDOS DESDE A ÚLTIMA FALA
-        # Isso protege totalmente a sua cota do Gemini contra spam de detecção
-        if itens_novos and (agora - self.ultima_requisicao_ia > 15):
+        # Se houver qualquer objeto real na frente da câmera
+        if itens_reais:
             self.tempo_visto_com_objetos += dt
-            if self.tempo_visto_com_objetos > 2.0: # Aumentado para 2 segundos de persistência
-                self.memoria_objetos.update(itens_novos)
-                self.queue_comunicacao.put(itens_novos)
+            
+            # Se o objeto persistir por mais de 2 segundos estáveis
+            if self.tempo_visto_com_objetos > 2.0:
+                
+                # E se já tiver passado mais de 15 segundos desde a última resposta da IA
+                if (agora - self.ultima_requisicao_ia > 15):
+                    self.queue_comunicacao.put(itens_reais)
+                    self.ultima_requisicao_ia = agora  # Bloqueia novas chamadas por 15s
+                    
                 self.tempo_visto_com_objetos = 0
-                self.ultima_requisicao_ia = agora  # Atualiza o cronômetro de descanso
         else:
             self.tempo_visto_com_objetos = 0
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
-
 
 # =====================================================================
 # 4. Interface Gráfica Web (Layout de duas colunas)
