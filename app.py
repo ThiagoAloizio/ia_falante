@@ -206,8 +206,9 @@ class VideoProcessor(VideoProcessorBase):
                 nome_objeto = yolo_model.names[int(box.cls)]
                 objetos_no_frame.add(nome_objeto)
 
-        # Filtra pessoas e foca nos objetos trazidos
-        itens_reais = [obj for obj in objetos_no_frame if obj != "person"]
+        # 1. Filtra pessoas e foca nos objetos trazidos
+        # ADICIONAMOS "fire hydrant" na lista de exclusão para o YOLO ignorar esse erro!
+        itens_reais = [obj for obj in objetos_no_frame if obj not in ["person", "fire hydrant"]]
 
         if itens_reais:
             self.tempo_visto_com_objetos += dt
