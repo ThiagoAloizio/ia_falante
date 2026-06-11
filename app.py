@@ -46,9 +46,12 @@ def load_yolo():
 yolo_model = load_yolo()
 
 def obter_frase_criativa(lista_objetos):
+    # Formata a lista de objetos para o prompt
+    itens_formatados = ", ".join(lista_objetos)
+    
     prompt = f"""
     Você é uma inteligência artificial de boas-vindas instalada na entrada de uma casa.
-    Uma pessoa acabou de chegar trazendo os seguintes objetos comuns: {lista_objetos}.
+    Uma pessoa acabou de chegar trazendo os seguintes objetos comuns: {itens_formatados}.
     Aja de forma natural, seja caloroso e interaja automaticamente sobre esses objetos com o usuário.
     Não use listas, não diga "foi detectado". Fale como um ser humano simpático recebendo um amigo em casa.
     Regra crucial: Faça um comentário detalhado, desenvolva bem o assunto sobre os itens trazidos e conclua com uma afirmação acolhedora. Escreva um parágrafo completo. Devolva APENAS o texto a ser falado.
@@ -57,15 +60,23 @@ def obter_frase_criativa(lista_objetos):
     tentativas = 3
     for i in range(tentativas):
         try:
+            # Correção da chamada oficial para a biblioteca google-genai
             resposta = client.models.generate_content(
                 model='gemini-2.5-flash',
                 contents=prompt
             )
-            return resposta.text.strip()
+            # Garante que estamos pegando o texto corretamente
+            if resposta.text:
+                return resposta.text.strip()
+            elif hasattr(resposta, 'candidates') and resposta.candidates:
+                return resposta.candidates[0].content.parts[0].text.strip()
+                
         except Exception as e:
+            # Mostra o erro real na tela do Streamlit para sabermos o que falhou (ex: chave inválida, cota, etc)
+            st.sidebar.error(f"Erro na tentativa {i+1} do Gemini: {e}")
             if i == tentativas - 1:
-                return "Olá! Que bom que você chegou. Seja bem-vindo de volta! Deixe suas coisas na entrada e fique à vontade para descansar."
-            time.sleep(1.5)
+                return f"Olá! Que bom que você chegou com seu {itens_formatados}. Seja bem-vindo de volta! Deixe suas coisas na entrada e fique à vontade."
+            time.sleep(1)
 
 # Nova função de áudio usando gTTS (Síncrona, leve e sem problemas de IP no servidor)
 def gerar_audio_gtts(texto, nome_arquivo):
