@@ -7,6 +7,7 @@ import time
 import asyncio
 import edge_tts
 import os
+from queue import Queue
 
 # Configuração da página do Streamlit
 st.set_page_config(page_title="IA de Boas-Vindas Contextual", layout="wide")
@@ -18,7 +19,7 @@ os.environ["QT_LOGGING_RULES"] = "*.debug=false;*.info=false;*.warning=false"
 # 1. Recursos Globais Estáticos Persistentes em Cache
 @st.cache_resource
 def obter_memoria_global():
-    from queue import Queue
+    # Inicializa uma única vez a memória de objetos e a fila de comunicação
     return set(), Queue()
 
 memoria_global_objetos, objeto_queue = obter_memoria_global()
@@ -69,12 +70,11 @@ async def gerar_audio_edge(texto, nome_arquivo):
     communicate = edge_tts.Communicate(texto, "pt-BR-FranciscaNeural")
     await communicate.save(nome_arquivo)
 
-# 3. Classe Processadora Nativa do WebRTC
+# 3. Classe Processadora Nativa do WebRTC (Sem dependência de contexto de UI)
 class VideoProcessor(VideoProcessorBase):
-    def __init__(self, memoria_objetos, queue_comunicacao, ctx):
+    def __init__(self, memoria_objetos, queue_comunicacao):
         self.memoria_objetos = memoria_objetos
         self.queue_comunicacao = queue_comunicacao
-        self.ctx = ctx  # Contexto da página principal do Streamlit
         self.tempo_visto_com_objetos = 0
         self.ultimo_tempo = time.time()
 
@@ -83,7 +83,7 @@ class VideoProcessor(VideoProcessorBase):
         
         agora = time.time()
         dt = agora - self.ultimo_tempo
-        self.ultimo_tempo = manager = agora
+        self.ultimo_tempo = agora
 
         results = yolo_model(img, verbose=False)
         objetos_no_frame = set()
@@ -94,20 +94,17 @@ class VideoProcessor(VideoProcessorBase):
                 nome_objeto = yolo_model.names[int(box.cls)]
                 objetos_no_frame.add(nome_objeto)
 
+        # Filtra pessoas e foca nos objetos trazidos
         itens_reais = [obj for obj in objetos_no_frame if obj != "person"]
         itens_novos = [item for item in itens_reais if item not in self.memoria_objetos]
 
         if itens_novos:
             self.tempo_visto_com_objetos += dt
-            if self.tempo_visto_com_objetos > 2.0:
+            # Se o objeto persistir por mais de 1.5 segundos (evita falsos positivos rápidos)
+            if self.tempo_visto_com_objetos > 1.5:
                 self.memoria_objetos.update(itens_novos)
                 self.queue_comunicacao.put(itens_novos)
                 self.tempo_visto_com_objetos = 0
-                
-                # O SEGREDO: Força o Streamlit a atualizar a interface imediatamente na detecção
-                if self.ctx:
-                    from streamlit.runtime.scriptrunner import ScriptRunner
-                    ScriptRunner(self.ctx).request_rerun()
         else:
             self.tempo_visto_com_objetos = 0
 
@@ -116,16 +113,13 @@ class VideoProcessor(VideoProcessorBase):
 # 4. Interface Gráfica Web (Layout de duas colunas)
 col1, col2 = st.columns(2)
 
-# Captura de forma segura o contexto de execução do navegador do usuário
-from streamlit.runtime.scriptrunner import get_script_run_ctx
-contexto_navegador = get_script_run_ctx()
-
 with col1:
     st.subheader("📷 Feed de Vídeo em Tempo Real")
     webrtc_streamer(
         key="ia-boas-vindas",
-        video_processor_factory=lambda: VideoProcessor(memoria_global_objetos, objeto_queue, contexto_navegador),
+        video_processor_factory=lambda: VideoProcessor(memoria_global_objetos, objeto_queue),
         media_stream_constraints={"video": True, "audio": False},
+        async_processing=True
     )
 
 with col2:
@@ -143,7 +137,8 @@ with col2:
         st.success("Memória limpa!")
         st.rerun()
 
-    # 5. Processamento Síncrono Acionado pelo Gatilho da Câmera
+    # Fragmento de atualização /pooling para verificar se a fila recebeu dados da câmera
+    # Sem travar o vídeo
     if not objeto_queue.empty():
         itens_detectados = objeto_queue.get()
         
@@ -151,20 +146,31 @@ with col2:
             frase = obter_frase_criativa(itens_detectados)
             st.session_state["texto_ia"] = frase
             
-            nome_arquivo = "resposta_estavel.mp3"
+            # Timestamp evita conflito de arquivos idênticos na nuvem
+            nome_arquivo = f"resposta_{int(time.time())}.mp3"
+            
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             loop.run_until_complete(gerar_audio_edge(frase, nome_arquivo))
             loop.close()
             
+            st.session_state["arquivo_audio"] = nome_arquivo
             st.session_state["tocar_audio"] = True
 
-    # Renderiza o texto gerado de forma estática e fixa
+    # Renderiza o texto gerado
     if st.session_state["texto_ia"]:
         st.info(st.session_state["texto_ia"])
     else:
-        st.write("Aguardando detecção de novos objetos...")
+        st.write("Aguardando detecção de novos objetos no vídeo...")
 
     # Se houver áudio pronto, renderiza o player nativo
-    if st.session_state["tocar_audio"] and os.path.exists("resposta_estavel.mp3"):
-        st.audio("resposta_estavel.mp3", format="audio/mp3", autoplay=True)
+    if st.session_state["tocar_audio"] and "arquivo_audio" in st.session_state:
+        if os.path.exists(st.session_state["arquivo_audio"]):
+            st.audio(st.session_state["arquivo_audio"], format="audio/mp3", autoplay=True)
+            # Desativa para não entrar em loop infinito de áudio ao redesenhar a página
+            st.session_state["tocar_audio"] = False 
+
+    # Pequena automação para checar a fila a cada 2 segundos caso esteja vazia
+    if objeto_queue.empty():
+        time.sleep(2)
+        st.rerun()
