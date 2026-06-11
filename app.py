@@ -17,10 +17,10 @@ st.title("🤖 IA de Boas-Vindas Contextual com YOLOv8 e Gemini")
 # Silencia logs do OpenCV
 os.environ["QT_LOGGING_RULES"] = "*.debug=false;*.info=false;*.warning=false"
 
-# 1. Recursos Globais Estáticos Persistentes (Protegidos contra recarregamentos de página)
+# 1. Recursos Globais Estáticos Persistentes
 @st.cache_resource
 def obter_recursos_globais():
-    return set(), Queue()  # Retorna a Memória de Objetos e a Fila de Comunicação
+    return set(), Queue()
 
 memoria_global_objetos, objeto_queue = obter_recursos_globais()
 
@@ -83,7 +83,7 @@ def transformar_audio_em_html(caminho_arquivo):
     </audio>
     """
 
-# 3. Classe Processadora Nativa do WebRTC (Thread-Safe)
+# 3. Classe Processadora Nativa do WebRTC
 class VideoProcessor(VideoProcessorBase):
     def __init__(self, memoria_objetos, queue_comunicacao):
         self.memoria_objetos = memoria_objetos
@@ -114,7 +114,6 @@ class VideoProcessor(VideoProcessorBase):
             self.tempo_visto_com_objetos += dt
             if self.tempo_visto_com_objetos > 2.0:
                 self.memoria_objetos.update(itens_novos)
-                # Injeta de forma blindada na Fila Global persistente
                 self.queue_comunicacao.put(itens_novos)
                 self.tempo_visto_com_objetos = 0
         else:
@@ -129,7 +128,6 @@ with col1:
     st.subheader("📷 Feed de Vídeo em Tempo Real")
     webrtc_streamer(
         key="ia-boas-vindas",
-        # Passa a fila persistente para a fábrica de processamento de vídeo
         video_processor_factory=lambda: VideoProcessor(memoria_global_objetos, objeto_queue),
         media_stream_constraints={"video": True, "audio": False},
     )
@@ -141,17 +139,15 @@ with col2:
         memoria_global_objetos.clear()
         st.session_state["texto_ia"] = ""
         st.session_state["audio_html"] = ""
-        # Limpa elementos remanescentes na Fila
         while not objeto_queue.empty():
             objeto_queue.get()
         st.success("Memória de objetos limpa!")
         st.rerun()
 
-    # 5. Monitoramento Blindado e síncrono da Fila de Comunicação
+    # 5. Monitoramento da Fila de Comunicação (Sem st.rerun interno)
     if not objeto_queue.empty():
         itens_detectados = objeto_queue.get()
         
-        # Executa as tarefas de processamento de rede de forma limpa na UI principal
         with st.spinner("IA Pensando em uma interação..."):
             frase = obter_frase_criativa(itens_detectados)
             st.session_state["texto_ia"] = frase
@@ -166,18 +162,18 @@ with col2:
                 st.session_state["audio_html"] = transformar_audio_em_html(nome_arquivo)
                 try: os.remove(nome_arquivo)
                 except: pass
-        st.rerun()
 
-    # Desenha o resultado estável na interface web
+    # Desenha o resultado de forma estável na interface web
     if st.session_state["texto_ia"]:
         st.info(st.session_state["texto_ia"])
     else:
         st.write("Aguardando detecção de novos objetos...")
 
+    # Se houver áudio injetado, executa e limpa o gatilho sem forçar recarregamento brusco
     if st.session_state["audio_html"]:
         st.markdown(st.session_state["audio_html"], unsafe_allow_html=True)
-        st.session_state["audio_html"] = ""  # Consome a tag de execução de áudio
+        st.session_state["audio_html"] = ""  
 
-# 6. Atualizador leve de interface (Diz para a tela ler a Fila a cada 1 segundo)
+# 6. Atualizador estável de interface (Apenas 1 atualização por segundo de forma limpa)
 from streamlit_autorefresh import st_autorefresh
 st_autorefresh(interval=1000, key="atualizador_de_interface_nuvem")
