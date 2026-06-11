@@ -7,6 +7,7 @@ import time
 import os
 from queue import Queue
 from gtts import gTTS
+from streamlit_autorefresh import st_autorefresh
 
 # Configuração da página do Streamlit
 st.set_page_config(page_title="IA de Boas-Vindas Contextual", layout="wide")
@@ -18,7 +19,6 @@ os.environ["QT_LOGGING_RULES"] = "*.debug=false;*.info=false;*.warning=false"
 # 1. Recursos Globais Estáticos Persistentes em Cache
 @st.cache_resource
 def obter_memoria_global():
-    # Inicializa uma única vez a memória de objetos e a fila de comunicação
     return set(), Queue()
 
 memoria_global_objetos, objeto_queue = obter_memoria_global()
@@ -30,6 +30,8 @@ if "tocar_audio" not in st.session_state:
     st.session_state["tocar_audio"] = False
 if "arquivo_audio" not in st.session_state:
     st.session_state["arquivo_audio"] = ""
+if "processando" not in st.session_state:
+    st.session_state["processando"] = False
 
 # 2. Configuração Segura da API Key
 try:
@@ -46,7 +48,6 @@ def load_yolo():
 yolo_model = load_yolo()
 
 def obter_frase_criativa(lista_objetos):
-    # Formata a lista de objetos para o prompt
     itens_formatados = ", ".join(lista_objetos)
     
     prompt = f"""
@@ -60,25 +61,21 @@ def obter_frase_criativa(lista_objetos):
     tentativas = 3
     for i in range(tentativas):
         try:
-            # Correção da chamada oficial para a biblioteca google-genai
             resposta = client.models.generate_content(
                 model='gemini-2.5-flash',
                 contents=prompt
             )
-            # Garante que estamos pegando o texto corretamente
             if resposta.text:
                 return resposta.text.strip()
             elif hasattr(resposta, 'candidates') and resposta.candidates:
                 return resposta.candidates[0].content.parts[0].text.strip()
-                
         except Exception as e:
-            # Mostra o erro real na tela do Streamlit para sabermos o que falhou (ex: chave inválida, cota, etc)
-            st.sidebar.error(f"Erro na tentativa {i+1} do Gemini: {e}")
+            # Mantém o erro visível na tela sem sumir
+            st.error(f"Erro na chamada do Gemini: {e}")
             if i == tentativas - 1:
-                return f"Olá! Que bom que você chegou com seu {itens_formatados}. Seja bem-vindo de volta! Deixe suas coisas na entrada e fique à vontade."
+                return f"Olá! Que bom que você chegou trazendo isso. Seja bem-vindo de volta! Sinta-se em casa."
             time.sleep(1)
 
-# Nova função de áudio usando gTTS (Síncrona, leve e sem problemas de IP no servidor)
 def gerar_audio_gtts(texto, nome_arquivo):
     try:
         tts = gTTS(text=texto, lang='pt', tld='com.br')
@@ -112,7 +109,6 @@ class VideoProcessor(VideoProcessorBase):
                 nome_objeto = yolo_model.names[int(box.cls)]
                 objetos_no_frame.add(nome_objeto)
 
-        # Filtra pessoas e foca nos objetos trazidos
         itens_reais = [obj for obj in objetos_no_frame if obj != "person"]
         itens_novos = [item for item in itens_reais if item not in self.memoria_objetos]
 
@@ -130,11 +126,9 @@ class VideoProcessor(VideoProcessorBase):
 # =====================================================================
 # 4. Interface Gráfica Web (Layout de duas colunas)
 # =====================================================================
-from streamlit_autorefresh import st_autorefresh
 
-# Atualiza a interface silenciosamente a cada 1000ms (1 segundo) 
-# Isso força o Streamlit a ler a fila de objetos sem travar o WebRTC
-st_autorefresh(interval=1000, key="atualizador_fila")
+# Aumentado para 2.5 segundos para dar tempo do ciclo da API rodar tranquilo
+st_autorefresh(interval=2500, key="atualizador_fila")
 
 col1, col2 = st.columns(2)
 
@@ -155,13 +149,15 @@ with col2:
         st.session_state["texto_ia"] = ""
         st.session_state["tocar_audio"] = False
         st.session_state["arquivo_audio"] = ""
+        st.session_state["processando"] = False
         while not objeto_queue.empty():
             objeto_queue.get()
         st.success("Memória limpa!")
         st.rerun()
 
-    # Agora o app vai conseguir entrar aqui porque a página se atualiza a cada 1 segundo
-    if not objeto_queue.empty():
+    # Só processa se a fila tiver itens E a IA não estiver no meio de um processamento
+    if not objeto_queue.empty() and not st.session_state["processando"]:
+        st.session_state["processando"] = True
         itens_detectados = objeto_queue.get()
         
         with st.spinner("IA Pensando em uma interação..."):
@@ -169,10 +165,11 @@ with col2:
             st.session_state["texto_ia"] = frase
             
             nome_arquivo = f"resposta_{int(time.time())}.mp3"
-            
             if gerar_audio_gtts(frase, nome_arquivo):
                 st.session_state["arquivo_audio"] = nome_arquivo
                 st.session_state["tocar_audio"] = True
+        
+        st.session_state["processando"] = False
 
     # Renderiza o texto gerado da IA
     if st.session_state["texto_ia"]:
