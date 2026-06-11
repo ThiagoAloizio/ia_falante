@@ -1,5 +1,5 @@
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 import av
 from ultralytics import YOLO
 from google import genai
@@ -9,6 +9,7 @@ import edge_tts
 import os
 import base64
 from queue import Queue
+from streamlit.runtime.scriptrunner import get_script_run_ctx
 
 # Configuração da página do Streamlit
 st.set_page_config(page_title="IA de Boas-Vindas Contextual", layout="wide")
@@ -17,12 +18,12 @@ st.title("🤖 IA de Boas-Vindas Contextual com YOLOv8 e Gemini")
 # Silencia logs do OpenCV
 os.environ["QT_LOGGING_RULES"] = "*.debug=false;*.info=false;*.warning=false"
 
-# 1. Recursos Globais em Cache Estático
+# 1. Recursos Globais em Cache Estático Persistente
 @st.cache_resource
 def obter_recursos_globais():
-    return Queue(), set(), {"tempo_visto": 0, "ultimo_tempo": time.time()}
+    return Queue(), set()
 
-objeto_queue, memoria_global_objetos, cronometro = obter_recursos_globais()
+objeto_queue, memoria_global_objetos = obter_recursos_globais()
 
 # 2. Inicialização das variáveis de interface
 if "texto_ia" not in st.session_state:
@@ -34,7 +35,7 @@ if "audio_html" not in st.session_state:
 try:
     MINHA_API_KEY = st.secrets["GEMINI_API_KEY"]
     client = genai.Client(api_key=MINHA_API_KEY)
-except Exception as e:
+except Exception:
     st.error("Erro: A chave 'GEMINI_API_KEY' não foi configurada nos Secrets do Streamlit.")
     st.stop()
 
@@ -77,45 +78,62 @@ def transformar_audio_em_html(caminho_arquivo):
     </audio>
     """
 
-# 4. Callback de processamento de imagem do WebRTC
-def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
-    img = frame.to_ndarray(format="bgr24")
-    
-    agora = time.time()
-    dt = agora - cronometro["ultimo_tempo"]
-    cronometro["ultimo_tempo"] = agora
+# 4. Classe Processadora de Vídeo Corrigida para Sincronizar com a UI
+class VideoProcessor(VideoProcessorBase):
+    def __init__(self, queue, memoria_objetos, ctx):
+        self.queue = queue
+        self.memoria_objetos = memoria_objetos
+        self.ctx = ctx  # Guarda o contexto de execução da página web
+        self.tempo_visto_com_objetos = 0
+        self.ultimo_tempo = time.time()
 
-    results = yolo_model(img, verbose=False)
-    objetos_no_frame = set()
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        img = frame.to_ndarray(format="bgr24")
+        
+        agora = time.time()
+        dt = agora - self.ultimo_tempo
+        self.ultimo_tempo = agora
 
-    for r in results:
-        img = r.plot()
-        for box in r.boxes:
-            nome_objeto = yolo_model.names[int(box.cls)]
-            objetos_no_frame.add(nome_objeto)
+        results = yolo_model(img, verbose=False)
+        objetos_no_frame = set()
 
-    itens_reais = [obj for obj in objetos_no_frame if obj != "person"]
-    itens_novos = [item for item in itens_reais if item not in memoria_global_objetos]
+        for r in results:
+            img = r.plot()
+            for box in r.boxes:
+                nome_objeto = yolo_model.names[int(box.cls)]
+                objetos_no_frame.add(nome_objeto)
 
-    if itens_novos:
-        cronometro["tempo_visto"] += dt
-        if cronometro["tempo_visto"] > 2.0:
-            memoria_global_objetos.update(itens_novos)
-            objeto_queue.put(itens_novos)  # Despacha o objeto para a fila
-            cronometro["tempo_visto"] = 0
-    else:
-        cronometro["tempo_visto"] = 0
+        itens_reais = [obj for obj in objetos_no_frame if obj != "person"]
+        itens_novos = [item for item in itens_reais if item not in self.memoria_objetos]
 
-    return av.VideoFrame.from_ndarray(img, format="bgr24")
+        if itens_novos:
+            self.tempo_visto_com_objetos += dt
+            if self.tempo_visto_com_objetos > 2.0:
+                self.memoria_objetos.update(itens_novos)
+                self.queue.put(itens_novos)
+                self.tempo_visto_com_objetos = 0
+                
+                # Força o Streamlit a atualizar a interface na hora usando o contexto salvo
+                if self.ctx:
+                    from streamlit.runtime.scriptrunner import ScriptRunner
+                    ScriptRunner(self.ctx).request_rerun()
+        else:
+            self.tempo_visto_com_objetos = 0
+
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 # 5. Interface Gráfica Web
 col1, col2 = st.columns(2)
+
+# Captura o contexto atual da sessão da interface ativa
+contexto_atual = get_script_run_ctx()
 
 with col1:
     st.subheader("📷 Feed de Vídeo em Tempo Real")
     webrtc_streamer(
         key="ia-boas-vindas",
-        video_frame_callback=video_frame_callback,
+        video_processor_factory=lambda: VideoProcessor(objeto_queue, memoria_global_objetos, contexto_atual),
+        rtc_configuration={"iceServers": [{"urls": "stun:://google.com"}]},
         media_stream_constraints={"video": True, "audio": False},
     )
 
@@ -129,38 +147,31 @@ with col2:
         st.success("Memória de objetos limpa!")
         st.rerun()
 
-    # Contêiner dinâmico que permite atualizar o status sem travar a interface
-    status_placeholder = st.empty()
-
-    # 6. Monitor de Fila Ativo na Interface Principal
+    # 6. Monitor de Fila Síncrono (Processa imediatamente após o request_rerun da câmera)
     if not objeto_queue.empty():
         itens_para_processar = objeto_queue.get()
         
-        with status_placeholder.container():
-            with st.spinner("IA Pensando em uma interação..."):
-                frase = obter_frase_criativa(itens_para_processar)
-                st.session_state["texto_ia"] = frase
-                
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(gerar_audio_edge(frase))
-                loop.close()
-                
-                if os.path.exists("resposta_web.mp3"):
-                    st.session_state["audio_html"] = transformar_audio_em_html("resposta_web.mp3")
+        with st.spinner("IA Pensando em uma interação..."):
+            frase = obter_frase_criativa(itens_para_processar)
+            st.session_state["texto_ia"] = ""  # Força limpeza visual
+            st.session_state["texto_ia"] = frase
+            
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(gerar_audio_edge(frase))
+            loop.close()
+            
+            if os.path.exists("resposta_web.mp3"):
+                st.session_state["audio_html"] = transformar_audio_em_html("resposta_web.mp3")
         st.rerun()
 
-    # Exibe o parágrafo de texto gerado
+    # Renderiza o texto do Gemini na interface
     if st.session_state["texto_ia"]:
         st.info(st.session_state["texto_ia"])
     else:
         st.write("Aguardando detecção de novos objetos...")
 
-    # Se houver áudio pendente, ele é injetado e executado pelo navegador
+    # Se houver áudio pendente, ele é executado pelo navegador
     if st.session_state["audio_html"]:
         st.markdown(st.session_state["audio_html"], unsafe_allow_html=True)
         st.session_state["audio_html"] = ""
-
-# 7. Força a UI do Streamlit a acordar e ler a fila a cada 1 segundo em paralelo com o vídeo
-from streamlit_autorefresh import st_autorefresh
-st_autorefresh(interval=1000, key="atualizador_de_fila_nuvem")
