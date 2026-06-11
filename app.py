@@ -119,7 +119,6 @@ with col1:
     webrtc_streamer(
         key="ia-boas-vindas",
         video_frame_callback=video_frame_callback,
-        rtc_configuration={"iceServers": [{"urls": "stun:://google.com"}]},
         media_stream_constraints={"video": True, "audio": False},
     )
 
