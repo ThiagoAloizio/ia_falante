@@ -8,6 +8,7 @@ import os
 from queue import Queue
 from gtts import gTTS
 from streamlit_autorefresh import st_autorefresh
+import random
 
 # Configuração da página do Streamlit
 st.set_page_config(page_title="IA de Boas-Vindas Contextual", layout="wide")
@@ -50,6 +51,13 @@ yolo_model = load_yolo()
 def obter_frase_criativa(lista_objetos):
     itens_formatados = ", ".join(lista_objetos)
     
+    # 1. Banco de frases criativas para servir de Fallback caso o Gemini esteja sem cota
+    saudacoes_locais = [
+        f"Seja muito bem-vindo de volta! Que ótimo que você chegou trazendo seu {itens_formatados}. Pode deixar tudo na entrada e ir descansar um pouco.",
+        f"Olha só quem chegou! Vejo que trouxe {itens_formatados} com você hoje. Sinta-se em casa, tire os sapatos e aproveite o resto do seu dia.",
+        f"Olá, que bom ver você! Muito interessante você estar com seu {itens_formatados} agora. Entre e fique totalmente à vontade."
+    ]
+    
     prompt = f"""
     Você é uma inteligência artificial de boas-vindas instalada na entrada de uma casa.
     Uma pessoa acabou de chegar trazendo os seguintes objetos comuns: {itens_formatados}.
@@ -58,8 +66,9 @@ def obter_frase_criativa(lista_objetos):
     Regra crucial: Faça um comentário detalhado, desenvolva bem o assunto sobre os itens trazidos e conclua com uma afirmação acolhedora. Escreva um parágrafo completo. Devolva APENAS o texto a ser falado.
     Proibição: Não faça nenhuma pergunta no final e não utilize pontos de interrogação.
     """
+    
+    # 2. Tenta chamar a API do Gemini de forma segura
     try:
-        # Força a chamada do Gemini
         resposta = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt
@@ -70,10 +79,11 @@ def obter_frase_criativa(lista_objetos):
             return resposta.candidates[0].content.parts[0].text.strip()
             
     except Exception as e:
-        # 🚨 TRAVA DE DIAGNÓSTICO: Para o app e joga o erro na tela sem sumir!
-        st.error("❌ O GEMINI FALHOU! DETALHES DO ERRO ABAIXO:")
-        st.exception(e)
-        st.stop() # Impede o autorefresh de atualizar a página e sumir com o erro
+        # Se cair aqui por erro de cota (429/Quota Exceeded), avisa discretamente e usa o fallback
+        st.sidebar.warning("⚠️ API do Gemini sem cota temporariamente. Usando gerador local.")
+        
+        # Retorna uma frase aleatória bem estruturada com o nome do objeto detectado pelo YOLO
+        return random.choice(saudacoes_locais)
 
 def gerar_audio_gtts(texto, nome_arquivo):
     try:
