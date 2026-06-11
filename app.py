@@ -10,6 +10,7 @@ import os
 import base64
 import threading
 from queue import Queue
+from streamlit_autorefresh import st_autorefresh
 
 # Configuração da página do Streamlit
 st.set_page_config(page_title="IA de Boas-Vindas Contextual", layout="wide")
@@ -76,13 +77,13 @@ def transformar_audio_em_html(caminho_arquivo):
     </audio>
     """
 
-def pipeline_processamento_ia(itens, ctx):
-    """Roda totalmente em segundo plano para não travar os frames do vídeo"""
+def pipeline_processamento_ia(itens):
+    """Roda totalmente em segundo plano de forma assíncrona"""
     try:
         # 1. Busca resposta no Gemini
         frase = obter_frase_criativa(itens)
         
-        # 2. Cria um arquivo único baseado no timestamp para evitar conflito de leitura/escrita
+        # 2. Cria um arquivo único baseado no timestamp para o áudio
         nome_arquivo = f"resposta_{int(time.time())}.mp3"
         
         loop = asyncio.new_event_loop()
@@ -93,30 +94,24 @@ def pipeline_processamento_ia(itens, ctx):
         # 3. Transforma em HTML player
         tag_html = transformar_audio_em_html(nome_arquivo)
         
-        # 4. Despacha o resultado pronto de volta para a Interface do Streamlit ler
+        # 4. Envia o pacote de texto e som para a fila que a interface web lê
         interface_queue.put((frase, tag_html))
         
-        # 5. Apaga o arquivo físico para manter o servidor limpo
+        # 5. Apaga o arquivo do servidor
         if os.path.exists(nome_arquivo):
             try:
                 os.remove(nome_arquivo)
             except:
                 pass
-                
-        # 6. Avisa a interface gráfica para atualizar e desenhar a resposta na tela
-        if ctx:
-            from streamlit.runtime.scriptrunner import ScriptRunner
-            ScriptRunner(ctx).request_rerun()
             
     except Exception as e:
         print(f"[Erro Pipeline Segundo Plano]: {e}")
 
-# 4. Classe Processadora de Vídeo (Ultra leve: só roda a detecção)
+# 4. Classe Processadora de Vídeo (Roda a 30+ FPS sem travar)
 class VideoProcessor(VideoProcessorBase):
-    def __init__(self, queue, memoria_objetos, ctx):
+    def __init__(self, queue, memoria_objetos):
         self.queue = queue
         self.memoria_objetos = memoria_objetos
-        self.ctx = ctx
         self.tempo_visto_com_objetos = 0
         self.ultimo_tempo = time.time()
 
@@ -144,10 +139,10 @@ class VideoProcessor(VideoProcessorBase):
             if self.tempo_visto_com_objetos > 2.0:
                 self.memoria_objetos.update(itens_novos)
                 
-                # Dispara a Thread de segundo plano para processar os dados de nuvem de forma isolada
+                # Inicia a Thread em background sem tocar na interface principal do Streamlit
                 threading.Thread(
                     target=pipeline_processamento_ia, 
-                    args=(itens_novos, self.ctx), 
+                    args=(itens_novos,), 
                     daemon=True
                 ).start()
                 
@@ -160,14 +155,11 @@ class VideoProcessor(VideoProcessorBase):
 # 5. Interface Gráfica Web
 col1, col2 = st.columns(2)
 
-from streamlit.runtime.scriptrunner import get_script_run_ctx
-contexto_atual = get_script_run_ctx()
-
 with col1:
     st.subheader("📷 Feed de Vídeo em Tempo Real")
     webrtc_streamer(
         key="ia-boas-vindas",
-        video_processor_factory=lambda: VideoProcessor(objeto_queue, memoria_global_objetos, contexto_atual),
+        video_processor_factory=lambda: VideoProcessor(objeto_queue, memoria_global_objetos),
         media_stream_constraints={"video": True, "audio": False},
     )
 
@@ -181,12 +173,11 @@ with col2:
         st.success("Memória de objetos limpa!")
         st.rerun()
 
-    # 6. Captura as respostas vindas da Thread de segundo plano sem travar nada
+    # 6. Captura as respostas vindas dos bastidores
     if not interface_queue.empty():
         frase_pronta, html_pronto = interface_queue.get()
         st.session_state["texto_ia"] = frase_pronta
         st.session_state["audio_html"] = html_pronto
-        st.rerun()
 
     # Renderiza o texto do Gemini na interface
     if st.session_state["texto_ia"]:
@@ -198,3 +189,6 @@ with col2:
     if st.session_state["audio_html"]:
         st.markdown(st.session_state["audio_html"], unsafe_allow_html=True)
         st.session_state["audio_html"] = ""
+
+# 7. Força a tela do navegador a checar se a Thread terminou o áudio a cada 1 segundo
+st_autorefresh(interval=1000, key="atualizador_de_interface_nuvem")
