@@ -48,7 +48,7 @@ yolo_model = load_yolo()
 def obter_frase_criativa(lista_objetos):
     prompt = f"""
     Você é uma inteligência artificial de boas-vindas instalada na entrada de uma casa.
-    Uma pessoa acabou de chegar trazendo os seguintes objetos inéditos que você ainda não tinha visto hoje: {lista_objetos}.
+    Uma pessoa acabou de chegar trazendo os seguintes objetos inéditos: {lista_objetos}.
     Aja de forma natural, seja caloroso e interaja automaticamente sobre esses novos objetos com o usuário.
     Não use listas, não diga "foi detectado". Fale como um ser humano simpático recebendo um amigo em casa.
     Regra crucial: Faça um comentário detalhado, desenvolva bem o assunto sobre os itens trazidos e conclua com uma afirmação acolhedora. Escreva um parágrafo completo. Devolva APENAS o texto a ser falado.
@@ -57,12 +57,21 @@ def obter_frase_criativa(lista_objetos):
     tentativas = 3
     for i in range(tentativas):
         try:
-            resposta = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
-            return resposta.text.strip()
-        except Exception:
+            # Sintaxe robusta para garantir compatibilidade na nuvem
+            resposta = client.models.generate_content(
+                model='gemini-1.5-flash',  # Mudado para 1.5-flash se o 2.5 estiver congestionado
+                contents=prompt
+            )
+            if resposta and hasattr(resposta, 'text'):
+                return resposta.text.strip()
+            return "Olá! Que bom que você chegou. Seja bem-vindo de volta!"
+        except Exception as e:
+            # Isso vai imprimir o erro real no log do seu Streamlit para vermos o que houve
+            print(f"[Tentativa {i+1} falhou] Erro na API do Gemini: {e}")
             if i == tentativas - 1:
                 return "Olá! Que bom que você chegou. Seja bem-vindo de volta! Deixe suas coisas na entrada e fique à vontade para descansar."
             time.sleep(1.5)
+
 
 async def gerar_audio_edge(texto, nome_arquivo):
     communicate = edge_tts.Communicate(texto, "pt-BR-FranciscaNeural")
