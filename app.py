@@ -7,7 +7,6 @@ import time
 import asyncio
 import edge_tts
 import os
-import base64
 from queue import Queue
 
 # Configuração da página do Streamlit
@@ -24,11 +23,11 @@ def obter_recursos_globais():
 
 memoria_global_objetos, objeto_queue = obter_recursos_globais()
 
-# Inicialização das variáveis normais de interface no session_state
+# Inicialização estável das variáveis de controle
 if "texto_ia" not in st.session_state:
     st.session_state["texto_ia"] = ""
-if "audio_html" not in st.session_state:
-    st.session_state["audio_html"] = ""
+if "tocar_audio" not in st.session_state:
+    st.session_state["tocar_audio"] = False
 
 # 2. Configuração Segura da API Key
 try:
@@ -62,7 +61,6 @@ def obter_frase_criativa(lista_objetos):
             )
             return resposta.text.strip()
         except Exception as e:
-            print(f"Erro na API do Gemini: {e}")
             if i == tentativas - 1:
                 return "Olá! Que bom que você chegou. Seja bem-vindo de volta! Deixe suas coisas na entrada e fique à vontade para descansar."
             time.sleep(1.5)
@@ -70,18 +68,6 @@ def obter_frase_criativa(lista_objetos):
 async def gerar_audio_edge(texto, nome_arquivo):
     communicate = edge_tts.Communicate(texto, "pt-BR-FranciscaNeural")
     await communicate.save(nome_arquivo)
-
-def transformar_audio_em_html(caminho_arquivo):
-    if not os.path.exists(caminho_arquivo):
-        return ""
-    with open(caminho_arquivo, "rb") as f:
-        data = f.read()
-    b64 = base64.b64encode(data).decode()
-    return f"""
-    <audio autoplay style="display:none;">
-        <source src="data:audio/mp3;base64,{b64}" type="audio/mp3">
-    </audio>
-    """
 
 # 3. Classe Processadora Nativa do WebRTC
 class VideoProcessor(VideoProcessorBase):
@@ -138,13 +124,16 @@ with col2:
     if st.button("🔄 Limpar Memória de Objetos"):
         memoria_global_objetos.clear()
         st.session_state["texto_ia"] = ""
-        st.session_state["audio_html"] = ""
+        st.session_state["tocar_audio"] = False
         while not objeto_queue.empty():
             objeto_queue.get()
-        st.success("Memória de objetos limpa!")
+        if os.path.exists("resposta_estavel.mp3"):
+            try: os.remove("resposta_estavel.mp3")
+            except: pass
+        st.success("Memória limpa!")
         st.rerun()
 
-    # 5. Monitoramento da Fila de Comunicação (Sem st.rerun interno)
+    # 5. Monitoramento de Fila Síncrono e Seguro
     if not objeto_queue.empty():
         itens_detectados = objeto_queue.get()
         
@@ -152,28 +141,27 @@ with col2:
             frase = obter_frase_criativa(itens_detectados)
             st.session_state["texto_ia"] = frase
             
-            nome_arquivo = f"resposta_{int(time.time())}.mp3"
+            # Sobrescreve sempre um arquivo com nome fixo e estavel
+            nome_arquivo = "resposta_estavel.mp3"
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             loop.run_until_complete(gerar_audio_edge(frase, nome_arquivo))
             loop.close()
             
-            if os.path.exists(nome_arquivo):
-                st.session_state["audio_html"] = transformar_audio_em_html(nome_arquivo)
-                try: os.remove(nome_arquivo)
-                except: pass
+            # Ativa a flag de exibição do player de som
+            st.session_state["tocar_audio"] = True
 
-    # Desenha o resultado de forma estável na interface web
+    # Renderiza o texto gerado de forma estática (Evita sumiços)
     if st.session_state["texto_ia"]:
         st.info(st.session_state["texto_ia"])
     else:
         st.write("Aguardando detecção de novos objetos...")
 
-    # Se houver áudio injetado, executa e limpa o gatilho sem forçar recarregamento brusco
-    if st.session_state["audio_html"]:
-        st.markdown(st.session_state["audio_html"], unsafe_allow_html=True)
-        st.session_state["audio_html"] = ""  
+    # Se a flag estiver ativa, renderiza o componente nativo estável com autoplay do navegador
+    if st.session_state["tocar_audio"] and os.path.exists("resposta_estavel.mp3"):
+        st.audio("resposta_estavel.mp3", format="audio/mp3", autoplay=True)
+        # Mantemos a flag ativa para o componente persistir na tela durante os ciclos de refresh
 
-# 6. Atualizador estável de interface (Apenas 1 atualização por segundo de forma limpa)
+# 6. Atualizador de interface (1 atualização por segundo)
 from streamlit_autorefresh import st_autorefresh
 st_autorefresh(interval=1000, key="atualizador_de_interface_nuvem")
