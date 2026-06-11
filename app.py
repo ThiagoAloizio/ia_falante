@@ -146,8 +146,11 @@ class VideoProcessor(VideoProcessorBase):
 # 4. Interface Gráfica Web (Layout de duas colunas)
 # =====================================================================
 
-# Aumentado para 3 segundos para dar estabilidade total à renderização
-st_autorefresh(interval=3000, key="atualizador_fila")
+# Se a IA estiver tocando áudio, aumentamos o tempo do refresh para 12 segundos
+# Isso dá tempo de a frase ser totalmente falada sem interrupções!
+# Se não estiver tocando, mantém em 3 segundos para monitorar a câmera de perto.
+tempo_refresh = 12000 if st.session_state["tocar_audio"] else 3000
+st_autorefresh(interval=tempo_refresh, key="atualizador_fila")
 
 col1, col2 = st.columns(2)
 
@@ -197,7 +200,10 @@ with col2:
         st.write("Aguardando detecção de novos objetos no vídeo...")
 
     # Se houver áudio pronto, renderiza o player nativo com autoplay
-    if st.session_state["tocar_audio"] and st.session_state["arquivo_audio"]:
+    if st.session_state["arquivo_audio"]:
         if os.path.exists(st.session_state["arquivo_audio"]):
             st.audio(st.session_state["arquivo_audio"], format="audio/mp3", autoplay=True)
-            st.session_state["tocar_audio"] = False
+            
+            # ATENÇÃO: Removemos o gatilho que resetava o tocar_audio imediatamente aqui,
+            # permitindo que a variável controle o tempo do 'tempo_refresh' lá no topo.
+            # O próprio gTTS cria arquivos únicos por timestamp, então não há risco de loop infinito.
