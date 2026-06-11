@@ -84,13 +84,16 @@ def gerar_audio_gtts(texto, nome_arquivo):
         st.error(f"Erro ao gerar áudio: {e}")
         return False
 
-# 3. Classe Processadora Nativa do WebRTC
+# =====================================================================
+# 3. Classe Processadora Nativa do WebRTC (Com Trava de Cota Integrada)
+# =====================================================================
 class VideoProcessor(VideoProcessorBase):
     def __init__(self, memoria_objetos, queue_comunicacao):
         self.memoria_objetos = memoria_objetos
         self.queue_comunicacao = queue_comunicacao
         self.tempo_visto_com_objetos = 0
         self.ultimo_tempo = time.time()
+        self.ultima_requisicao_ia = 0  # Guarda o momento da última interação
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
@@ -108,26 +111,31 @@ class VideoProcessor(VideoProcessorBase):
                 nome_objeto = yolo_model.names[int(box.cls)]
                 objetos_no_frame.add(nome_objeto)
 
+        # Filtra pessoas e foca nos objetos trazidos
         itens_reais = [obj for obj in objetos_no_frame if obj != "person"]
         itens_novos = [item for item in itens_reais if item not in self.memoria_objetos]
 
-        if itens_novos:
+        # SÓ PERMITE ENVIAR PARA A IA SE JÁ PASSARAM 15 SEGUNDOS DESDE A ÚLTIMA FALA
+        # Isso protege totalmente a sua cota do Gemini contra spam de detecção
+        if itens_novos and (agora - self.ultima_requisicao_ia > 15):
             self.tempo_visto_com_objetos += dt
-            if self.tempo_visto_com_objetos > 1.5:
+            if self.tempo_visto_com_objetos > 2.0: # Aumentado para 2 segundos de persistência
                 self.memoria_objetos.update(itens_novos)
                 self.queue_comunicacao.put(itens_novos)
                 self.tempo_visto_com_objetos = 0
+                self.ultima_requisicao_ia = agora  # Atualiza o cronômetro de descanso
         else:
             self.tempo_visto_com_objetos = 0
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
+
 # =====================================================================
 # 4. Interface Gráfica Web (Layout de duas colunas)
 # =====================================================================
 
-# Aumentado para 2.5 segundos para dar tempo do ciclo da API rodar tranquilo
-st_autorefresh(interval=2500, key="atualizador_fila")
+# Aumentado para 3 segundos para dar estabilidade total à renderização
+st_autorefresh(interval=3000, key="atualizador_fila")
 
 col1, col2 = st.columns(2)
 
@@ -154,7 +162,7 @@ with col2:
         st.success("Memória limpa!")
         st.rerun()
 
-    # Só processa se a fila tiver itens E a IA não estiver no meio de um processamento
+    # Processa a fila de forma segura
     if not objeto_queue.empty() and not st.session_state["processando"]:
         st.session_state["processando"] = True
         itens_detectados = objeto_queue.get()
