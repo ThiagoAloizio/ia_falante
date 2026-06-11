@@ -8,8 +8,8 @@ import asyncio
 import edge_tts
 import os
 import base64
+import threading
 from queue import Queue
-from streamlit.runtime.scriptrunner import get_script_run_ctx
 
 # Configuração da página do Streamlit
 st.set_page_config(page_title="IA de Boas-Vindas Contextual", layout="wide")
@@ -18,12 +18,12 @@ st.title("🤖 IA de Boas-Vindas Contextual com YOLOv8 e Gemini")
 # Silencia logs do OpenCV
 os.environ["QT_LOGGING_RULES"] = "*.debug=false;*.info=false;*.warning=false"
 
-# 1. Recursos Globais em Cache Estático Persistente
+# 1. Recursos Globais Estáticos Persistentes
 @st.cache_resource
-def obter_recursos_globais():
-    return Queue(), set()
+def obtener_recursos_globais():
+    return Queue(), set(), Queue()
 
-objeto_queue, memoria_global_objetos = obter_recursos_globais()
+objeto_queue, memoria_global_objetos, interface_queue = obtener_recursos_globais()
 
 # 2. Inicialização das variáveis de interface
 if "texto_ia" not in st.session_state:
@@ -54,21 +54,19 @@ def obter_frase_criativa(lista_objetos):
     Regra crucial: Faça um comentário detalhado, desenvolva bem o assunto sobre os itens trazidos e conclua com uma afirmação acolhedora. Escreva um parágrafo completo. Devolva APENAS o texto a ser falado.
     Proibição: Não faça nenhuma pergunta no final e não utilize pontos de interrogação.
     """
-    tentativas = 3
-    for i in range(tentativas):
-        try:
-            resposta = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
-            return resposta.text.strip()
-        except Exception:
-            if i == tentativas - 1:
-                return "Olá! Que bom que você chegou. Seja bem-vindo de volta! Deixe suas coisas na entrada e fique à vontade para descansar."
-            time.sleep(1.5)
+    try:
+        resposta = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+        return resposta.text.strip()
+    except Exception:
+        return "Olá! Que bom que você chegou. Seja bem-vindo de volta! Deixe suas coisas na entrada e fique à vontade para descansar."
 
-async def gerar_audio_edge(texto):
+async def gerar_audio_edge(texto, nome_arquivo):
     communicate = edge_tts.Communicate(texto, "pt-BR-FranciscaNeural")
-    await communicate.save("resposta_web.mp3")
+    await communicate.save(nome_arquivo)
 
 def transformar_audio_em_html(caminho_arquivo):
+    if not os.path.exists(caminho_arquivo):
+        return ""
     with open(caminho_arquivo, "rb") as f:
         data = f.read()
     b64 = base64.b64encode(data).decode()
@@ -78,12 +76,47 @@ def transformar_audio_em_html(caminho_arquivo):
     </audio>
     """
 
-# 4. Classe Processadora de Vídeo Corrigida para Sincronizar com a UI
+def pipeline_processamento_ia(itens, ctx):
+    """Roda totalmente em segundo plano para não travar os frames do vídeo"""
+    try:
+        # 1. Busca resposta no Gemini
+        frase = obter_frase_criativa(itens)
+        
+        # 2. Cria um arquivo único baseado no timestamp para evitar conflito de leitura/escrita
+        nome_arquivo = f"resposta_{int(time.time())}.mp3"
+        
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(gerar_audio_edge(frase, nome_arquivo))
+        loop.close()
+        
+        # 3. Transforma em HTML player
+        tag_html = transformar_audio_em_html(nome_arquivo)
+        
+        # 4. Despacha o resultado pronto de volta para a Interface do Streamlit ler
+        interface_queue.put((frase, tag_html))
+        
+        # 5. Apaga o arquivo físico para manter o servidor limpo
+        if os.path.exists(nome_arquivo):
+            try:
+                os.remove(nome_arquivo)
+            except:
+                pass
+                
+        # 6. Avisa a interface gráfica para atualizar e desenhar a resposta na tela
+        if ctx:
+            from streamlit.runtime.scriptrunner import ScriptRunner
+            ScriptRunner(ctx).request_rerun()
+            
+    except Exception as e:
+        print(f"[Erro Pipeline Segundo Plano]: {e}")
+
+# 4. Classe Processadora de Vídeo (Ultra leve: só roda a detecção)
 class VideoProcessor(VideoProcessorBase):
     def __init__(self, queue, memoria_objetos, ctx):
         self.queue = queue
         self.memoria_objetos = memoria_objetos
-        self.ctx = ctx  # Guarda o contexto de execução da página web
+        self.ctx = ctx
         self.tempo_visto_com_objetos = 0
         self.ultimo_tempo = time.time()
 
@@ -110,13 +143,15 @@ class VideoProcessor(VideoProcessorBase):
             self.tempo_visto_com_objetos += dt
             if self.tempo_visto_com_objetos > 2.0:
                 self.memoria_objetos.update(itens_novos)
-                self.queue.put(itens_novos)
-                self.tempo_visto_com_objetos = 0
                 
-                # Força o Streamlit a atualizar a interface na hora usando o contexto salvo
-                if self.ctx:
-                    from streamlit.runtime.scriptrunner import ScriptRunner
-                    ScriptRunner(self.ctx).request_rerun()
+                # Dispara a Thread de segundo plano para processar os dados de nuvem de forma isolada
+                threading.Thread(
+                    target=pipeline_processamento_ia, 
+                    args=(itens_novos, self.ctx), 
+                    daemon=True
+                ).start()
+                
+                self.tempo_visto_com_objetos = 0
         else:
             self.tempo_visto_com_objetos = 0
 
@@ -125,7 +160,7 @@ class VideoProcessor(VideoProcessorBase):
 # 5. Interface Gráfica Web
 col1, col2 = st.columns(2)
 
-# Captura o contexto atual da sessão da interface ativa
+from streamlit.runtime.scriptrunner import get_script_run_ctx
 contexto_atual = get_script_run_ctx()
 
 with col1:
@@ -146,22 +181,11 @@ with col2:
         st.success("Memória de objetos limpa!")
         st.rerun()
 
-    # 6. Monitor de Fila Síncrono (Processa imediatamente após o request_rerun da câmera)
-    if not objeto_queue.empty():
-        itens_para_processar = objeto_queue.get()
-        
-        with st.spinner("IA Pensando em uma interação..."):
-            frase = obter_frase_criativa(itens_para_processar)
-            st.session_state["texto_ia"] = ""  # Força limpeza visual
-            st.session_state["texto_ia"] = frase
-            
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(gerar_audio_edge(frase))
-            loop.close()
-            
-            if os.path.exists("resposta_web.mp3"):
-                st.session_state["audio_html"] = transformar_audio_em_html("resposta_web.mp3")
+    # 6. Captura as respostas vindas da Thread de segundo plano sem travar nada
+    if not interface_queue.empty():
+        frase_pronta, html_pronto = interface_queue.get()
+        st.session_state["texto_ia"] = frase_pronta
+        st.session_state["audio_html"] = html_pronto
         st.rerun()
 
     # Renderiza o texto do Gemini na interface
@@ -170,7 +194,7 @@ with col2:
     else:
         st.write("Aguardando detecção de novos objetos...")
 
-    # Se houver áudio pendente, ele é executado pelo navegador
+    # Se houver áudio pendente vindo dos bastidores, o navegador reproduz na hora
     if st.session_state["audio_html"]:
         st.markdown(st.session_state["audio_html"], unsafe_allow_html=True)
         st.session_state["audio_html"] = ""
