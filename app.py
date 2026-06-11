@@ -9,8 +9,6 @@ import edge_tts
 import os
 import base64
 import threading
-from queue import Queue
-from streamlit_autorefresh import st_autorefresh
 
 # Configuração da página do Streamlit
 st.set_page_config(page_title="IA de Boas-Vindas Contextual", layout="wide")
@@ -19,20 +17,20 @@ st.title("🤖 IA de Boas-Vindas Contextual com YOLOv8 e Gemini")
 # Silencia logs do OpenCV
 os.environ["QT_LOGGING_RULES"] = "*.debug=false;*.info=false;*.warning=false"
 
-# 1. Recursos Globais Estáticos Persistentes
+# 1. Recursos Estáticos Persistentes para controle de falas
 @st.cache_resource
-def obtener_recursos_globais():
-    return Queue(), set(), Queue()
+def obter_memoria_global():
+    return set()  # Guarda o histórico para NUNCA repetir o mesmo objeto no dia
 
-objeto_queue, memoria_global_objetos, interface_queue = obtener_recursos_globais()
+memoria_global_objetos = obter_memoria_global()
 
-# 2. Inicialização das variáveis de interface
+# Inicialização das variáveis normais de interface
 if "texto_ia" not in st.session_state:
     st.session_state["texto_ia"] = ""
 if "audio_html" not in st.session_state:
     st.session_state["audio_html"] = ""
 
-# 3. Configuração Segura da API Key
+# 2. Configuração Segura da API Key
 try:
     MINHA_API_KEY = st.secrets["GEMINI_API_KEY"]
     client = genai.Client(api_key=MINHA_API_KEY)
@@ -78,12 +76,9 @@ def transformar_audio_em_html(caminho_arquivo):
     """
 
 def pipeline_processamento_ia(itens):
-    """Roda totalmente em segundo plano de forma assíncrona"""
+    """Executa a geração de inteligência artificial em segundo plano"""
     try:
-        # 1. Busca resposta no Gemini
         frase = obter_frase_criativa(itens)
-        
-        # 2. Cria um arquivo único baseado no timestamp para o áudio
         nome_arquivo = f"resposta_{int(time.time())}.mp3"
         
         loop = asyncio.new_event_loop()
@@ -91,29 +86,25 @@ def pipeline_processamento_ia(itens):
         loop.run_until_complete(gerar_audio_edge(frase, nome_arquivo))
         loop.close()
         
-        # 3. Transforma em HTML player
         tag_html = transformar_audio_em_html(nome_arquivo)
         
-        # 4. Envia o pacote de texto e som para a fila que a interface web lê
-        interface_queue.put((frase, tag_html))
+        # Salva o resultado direto nas variáveis de sessão para exibição segura
+        st.session_state["texto_ia"] = frase
+        st.session_state["audio_html"] = tag_html
         
-        # 5. Apaga o arquivo do servidor
         if os.path.exists(nome_arquivo):
-            try:
-                os.remove(nome_arquivo)
-            except:
-                pass
-            
+            try: os.remove(nome_arquivo)
+            except: pass
     except Exception as e:
-        print(f"[Erro Pipeline Segundo Plano]: {e}")
+        print(f"[Erro Background]: {e}")
 
-# 4. Classe Processadora de Vídeo (Roda a 30+ FPS sem travar)
+# 3. Classe Processadora Nativa do WebRTC (Thread-safe através de atributos de instância)
 class VideoProcessor(VideoProcessorBase):
-    def __init__(self, queue, memoria_objetos):
-        self.queue = queue
+    def __init__(self, memoria_objetos):
         self.memoria_objetos = memoria_objetos
         self.tempo_visto_com_objetos = 0
         self.ultimo_tempo = time.time()
+        self.novos_itens_compartilhados = None  # Canal limpo de comunicação externa
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
@@ -138,28 +129,23 @@ class VideoProcessor(VideoProcessorBase):
             self.tempo_visto_com_objetos += dt
             if self.tempo_visto_com_objetos > 2.0:
                 self.memoria_objetos.update(itens_novos)
-                
-                # Inicia a Thread em background sem tocar na interface principal do Streamlit
-                threading.Thread(
-                    target=pipeline_processamento_ia, 
-                    args=(itens_novos,), 
-                    daemon=True
-                ).start()
-                
+                # Guarda o dado diretamente no atributo da classe, visível para a interface
+                self.novos_itens_compartilhados = itens_novos
                 self.tempo_visto_com_objetos = 0
         else:
             self.tempo_visto_com_objetos = 0
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-# 5. Interface Gráfica Web
+# 4. Interface Gráfica Web (Layout de duas colunas)
 col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("📷 Feed de Vídeo em Tempo Real")
-    webrtc_streamer(
+    # Capturamos o contexto do WebRTC streamer na variável ctx
+    ctx = webrtc_streamer(
         key="ia-boas-vindas",
-        video_processor_factory=lambda: VideoProcessor(objeto_queue, memoria_global_objetos),
+        video_processor_factory=lambda: VideoProcessor(memoria_global_objetos),
         media_stream_constraints={"video": True, "audio": False},
     )
 
@@ -173,22 +159,35 @@ with col2:
         st.success("Memória de objetos limpa!")
         st.rerun()
 
-    # 6. Captura as respostas vindas dos bastidores
-    if not interface_queue.empty():
-        frase_pronta, html_pronto = interface_queue.get()
-        st.session_state["texto_ia"] = frase_pronta
-        st.session_state["audio_html"] = html_pronto
+    # Contêiner onde os textos e avisos serão desenhados dinamicamente
+    area_resposta_ia = st.empty()
 
-    # Renderiza o texto do Gemini na interface
-    if st.session_state["texto_ia"]:
-        st.info(st.session_state["texto_ia"])
-    else:
-        st.write("Aguardando detecção de novos objetos...")
+    # 5. O SEGREDO DO FUNCIONAMENTO: Varredura contínua e nativa do estado da câmera
+    if ctx.video_processor:
+        # Verifica diretamente se a propriedade interna da instância da câmera mudou
+        if ctx.video_processor.novos_itens_compartilhados is not None:
+            itens_detectados = ctx.video_processor.novos_itens_compartilhados
+            ctx.video_processor.novos_itens_compartilhados = None  # Limpa o gatilho na hora
+            
+            with area_resposta_ia.container():
+                with st.spinner("IA Pensando em uma interação..."):
+                    # Executa a geração em uma thread para não engasgar os quadros da webcam
+                    t = threading.Thread(target=pipeline_processamento_ia, args=(itens_detectados,))
+                    t.start()
+                    t.join()  # Sincroniza o fim do processamento do texto/áudio antes de desenhar a tela
+            st.rerun()
 
-    # Se houver áudio pendente vindo dos bastidores, o navegador reproduz na hora
-    if st.session_state["audio_html"]:
-        st.markdown(st.session_state["audio_html"], unsafe_allow_html=True)
-        st.session_state["audio_html"] = ""
+    # Desenha o resultado estável na interface web
+    with area_resposta_ia.container():
+        if st.session_state["texto_ia"]:
+            st.info(st.session_state["texto_ia"])
+        else:
+            st.write("Aguardando detecção de novos objetos...")
 
-# 7. Força a tela do navegador a checar se a Thread terminou o áudio a cada 1 segundo
+        if st.session_state["audio_html"]:
+            st.markdown(st.session_state["audio_html"], unsafe_allow_html=True)
+            st.session_state["audio_html"] = ""  # Consome a tag
+
+# 6. Atualizador ultra leve de interface (Diz para a tela ler o ctx da câmera a cada 1 segundo)
+from streamlit_autorefresh import st_autorefresh
 st_autorefresh(interval=1000, key="atualizador_de_interface_nuvem")
