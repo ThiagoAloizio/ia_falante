@@ -8,6 +8,7 @@ import asyncio
 import edge_tts
 import os
 import base64
+from queue import Queue
 
 # Configuração da página do Streamlit
 st.set_page_config(page_title="IA de Boas-Vindas Contextual", layout="wide")
@@ -16,14 +17,14 @@ st.title("🤖 IA de Boas-Vindas Contextual com YOLOv8 e Gemini")
 # Silencia logs do OpenCV
 os.environ["QT_LOGGING_RULES"] = "*.debug=false;*.info=false;*.warning=false"
 
-# 1. Recursos Estáticos Persistentes
+# 1. Recursos Globais Estáticos Persistentes (Protegidos contra recarregamentos de página)
 @st.cache_resource
-def obter_memoria_global():
-    return set()  # Histórico permanente de objetos vistos
+def obter_recursos_globais():
+    return set(), Queue()  # Retorna a Memória de Objetos e a Fila de Comunicação
 
-memoria_global_objetos = obter_memoria_global()
+memoria_global_objetos, objeto_queue = obter_recursos_globais()
 
-# Inicialização das variáveis normais de interface
+# Inicialização das variáveis normais de interface no session_state
 if "texto_ia" not in st.session_state:
     st.session_state["texto_ia"] = ""
 if "audio_html" not in st.session_state:
@@ -46,8 +47,8 @@ yolo_model = load_yolo()
 def obter_frase_criativa(lista_objetos):
     prompt = f"""
     Você é uma inteligência artificial de boas-vindas instalada na entrada de uma casa.
-    Uma pessoa acabou de chegar trazendo os seguintes objetos inéditos que você ainda não tinha visto hoje: {lista_objetos}.
-    Aja de forma natural, seja caloroso e interaja automaticamente sobre esses novos objetos com o usuário.
+    Uma pessoa acabou de chegar trazendo os seguintes objetos comuns: {lista_objetos}.
+    Aja de forma natural, seja caloroso e interaja automaticamente sobre esses objetos com o usuário.
     Não use listas, não diga "foi detectado". Fale como um ser humano simpático recebendo um amigo em casa.
     Regra crucial: Faça um comentário detalhado, desenvolva bem o assunto sobre os itens trazidos e conclua com uma afirmação acolhedora. Escreva um parágrafo completo. Devolva APENAS o texto a ser falado.
     Proibição: Não faça nenhuma pergunta no final e não utilize pontos de interrogação.
@@ -82,13 +83,13 @@ def transformar_audio_em_html(caminho_arquivo):
     </audio>
     """
 
-# 3. Classe Processadora Nativa do WebRTC
+# 3. Classe Processadora Nativa do WebRTC (Thread-Safe)
 class VideoProcessor(VideoProcessorBase):
-    def __init__(self, memoria_objetos):
+    def __init__(self, memoria_objetos, queue_comunicacao):
         self.memoria_objetos = memoria_objetos
+        self.queue_comunicacao = queue_comunicacao
         self.tempo_visto_com_objetos = 0
         self.ultimo_tempo = time.time()
-        self.novos_itens_compartilhados = None
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
@@ -113,7 +114,8 @@ class VideoProcessor(VideoProcessorBase):
             self.tempo_visto_com_objetos += dt
             if self.tempo_visto_com_objetos > 2.0:
                 self.memoria_objetos.update(itens_novos)
-                self.novos_itens_compartilhados = itens_novos
+                # Injeta de forma blindada na Fila Global persistente
+                self.queue_comunicacao.put(itens_novos)
                 self.tempo_visto_com_objetos = 0
         else:
             self.tempo_visto_com_objetos = 0
@@ -125,9 +127,10 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("📷 Feed de Vídeo em Tempo Real")
-    ctx = webrtc_streamer(
+    webrtc_streamer(
         key="ia-boas-vindas",
-        video_processor_factory=lambda: VideoProcessor(memoria_global_objetos),
+        # Passa a fila persistente para a fábrica de processamento de vídeo
+        video_processor_factory=lambda: VideoProcessor(memoria_global_objetos, objeto_queue),
         media_stream_constraints={"video": True, "audio": False},
     )
 
@@ -138,15 +141,17 @@ with col2:
         memoria_global_objetos.clear()
         st.session_state["texto_ia"] = ""
         st.session_state["audio_html"] = ""
+        # Limpa elementos remanescentes na Fila
+        while not objeto_queue.empty():
+            objeto_queue.get()
         st.success("Memória de objetos limpa!")
         st.rerun()
 
-    # 5. Monitoramento síncrono e direto na interface principal
-    if ctx.video_processor and ctx.video_processor.novos_itens_compartilhados is not None:
-        itens_detectados = ctx.video_processor.novos_itens_compartilhados
-        ctx.video_processor.novos_itens_compartilhados = None  # Limpa o gatilho
+    # 5. Monitoramento Blindado e síncrono da Fila de Comunicação
+    if not objeto_queue.empty():
+        itens_detectados = objeto_queue.get()
         
-        # Executa as tarefas pesadas de rede de forma síncrona para garantir a entrega
+        # Executa as tarefas de processamento de rede de forma limpa na UI principal
         with st.spinner("IA Pensando em uma interação..."):
             frase = obter_frase_criativa(itens_detectados)
             st.session_state["texto_ia"] = frase
@@ -171,8 +176,8 @@ with col2:
 
     if st.session_state["audio_html"]:
         st.markdown(st.session_state["audio_html"], unsafe_allow_html=True)
-        st.session_state["audio_html"] = ""  # Consome a tag
+        st.session_state["audio_html"] = ""  # Consome a tag de execução de áudio
 
-# 6. Atualizador leve de interface (Diz para a tela ler as novidades a cada 1 segundo)
+# 6. Atualizador leve de interface (Diz para a tela ler a Fila a cada 1 segundo)
 from streamlit_autorefresh import st_autorefresh
 st_autorefresh(interval=1000, key="atualizador_de_interface_nuvem")
