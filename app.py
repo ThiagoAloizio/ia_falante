@@ -147,7 +147,7 @@ def gerar_audio_gtts(texto, nome_arquivo):
         return False
 
 # =====================================================================
-# 3. Classe Processadora Nativa do WebRTC (Corrigida)
+# 3. Classe Processadora Nativa do WebRTC (Com Tradução na Tela)
 # =====================================================================
 class VideoProcessor(VideoProcessorBase):
     def __init__(self, memoria_objetos, queue_comunicacao):
@@ -155,9 +155,27 @@ class VideoProcessor(VideoProcessorBase):
         self.queue_comunicacao = queue_comunicacao
         self.tempo_visto_com_objetos = 0
         self.ultimo_tempo = time.time()
-        self.ultima_requisicao_ia = 0  # Cronômetro contra spam na API
+        self.ultima_requisicao_ia = 0
+
+        # Dicionário idêntico para garantir a tradução visual nos frames da câmera
+        self.traducoes_visuais = {
+            "person": "pessoa", "bicycle": "bicicleta", "car": "carro", "motorcycle": "moto",
+            "backpack": "mochila", "umbrella": "guarda-chuva", "handbag": "bolsa", "tie": "gravata",
+            "suitcase": "mala", "bottle": "garrafa", "wine glass": "taça de vinho", "cup": "copo",
+            "fork": "garfo", "knife": "faca", "spoon": "colher", "bowl": "tigela", "banana": "banana",
+            "apple": "maçã", "sandwich": "sanduíche", "orange": "laranja", "broccoli": "brócolis",
+            "carrot": "cenoura", "hot dog": "cachorro-quente", "pizza": "pizza", "donut": "donut",
+            "cake": "bolo", "chair": "cadeira", "couch": "sofá", "potted plant": "vaso de planta",
+            "bed": "cama", "dining table": "mesa de jantar", "tv": "televisão", "laptop": "notebook",
+            "mouse": "mouse", "remote": "controle remoto", "keyboard": "teclado", "cell phone": "celular",
+            "microwave": "micro-ondas", "oven": "forno", "toaster": "torradeira", "sink": "pia",
+            "refrigerator": "geladeira", "book": "livro", "clock": "relógio", "vase": "vaso",
+            "scissors": "tesoura", "teddy bear": "ursinho de pelúcia", "hair drier": "secador de cabelo",
+            "toothbrush": "escova de dentes"
+        }
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        import cv2 # Garante que o OpenCV está disponível para desenho manual se necessário
         img = frame.to_ndarray(format="bgr24")
         
         agora = time.time()
@@ -168,7 +186,22 @@ class VideoProcessor(VideoProcessorBase):
         objetos_no_frame = set()
 
         for r in results:
+            # Em vez de usar o r.plot() padrão que fixa o inglês, 
+            # vamos alterar temporariamente os nomes mapeados no modelo para este frame
+            nomes_originais = r.names.copy()
+            
+            # Sobrescreve as classes detectadas com os nomes traduzidos para exibição na caixa
+            for idx, nome_en in r.names.items():
+                if nome_en in self.traducoes_visuais:
+                    r.names[idx] = self.traducoes_visuais[nome_en]
+            
+            # Agora o plot() vai desenhar com os nomes em português!
             img = r.plot()
+            
+            # Restaura os nomes originais no modelo para não quebrar a lógica interna do YOLO
+            r.names = nomes_originais
+
+            # Coleta os nomes originais em inglês para a lógica da fila e do gTTS
             for box in r.boxes:
                 nome_objeto = yolo_model.names[int(box.cls)]
                 objetos_no_frame.add(nome_objeto)
@@ -176,18 +209,12 @@ class VideoProcessor(VideoProcessorBase):
         # Filtra pessoas e foca nos objetos trazidos
         itens_reais = [obj for obj in objetos_no_frame if obj != "person"]
 
-        # Se houver qualquer objeto real na frente da câmera
         if itens_reais:
             self.tempo_visto_com_objetos += dt
-            
-            # Se o objeto persistir por mais de 2 segundos estáveis
             if self.tempo_visto_com_objetos > 2.0:
-                
-                # E se já tiver passado mais de 15 segundos desde a última resposta da IA
                 if (agora - self.ultima_requisicao_ia > 15):
                     self.queue_comunicacao.put(itens_reais)
-                    self.ultima_requisicao_ia = agora  # Bloqueia novas chamadas por 15s
-                    
+                    self.ultima_requisicao_ia = agora
                 self.tempo_visto_com_objetos = 0
         else:
             self.tempo_visto_com_objetos = 0
