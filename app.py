@@ -7,7 +7,6 @@ import time
 import asyncio
 import edge_tts
 import os
-from queue import Queue
 
 # Configuração da página do Streamlit
 st.set_page_config(page_title="IA de Boas-Vindas Contextual", layout="wide")
@@ -16,14 +15,15 @@ st.title("🤖 IA de Boas-Vindas Contextual com YOLOv8 e Gemini")
 # Silencia logs do OpenCV
 os.environ["QT_LOGGING_RULES"] = "*.debug=false;*.info=false;*.warning=false"
 
-# 1. Recursos Globais Estáticos Persistentes em Cache (Evita perda de dados entre recarregamentos)
+# 1. Recursos Globais Estáticos Persistentes em Cache
 @st.cache_resource
-def obter_recursos_globais():
+def obter_memoria_global():
+    from queue import Queue
     return set(), Queue()
 
-memoria_global_objetos, objeto_queue = obter_recursos_globais()
+memoria_global_objetos, objeto_queue = obter_memoria_global()
 
-# Inicialização estável das variáveis de controle na sessão do navegador
+# Inicialização estável das variáveis de controle na sessão
 if "texto_ia" not in st.session_state:
     st.session_state["texto_ia"] = ""
 if "tocar_audio" not in st.session_state:
@@ -71,9 +71,10 @@ async def gerar_audio_edge(texto, nome_arquivo):
 
 # 3. Classe Processadora Nativa do WebRTC
 class VideoProcessor(VideoProcessorBase):
-    def __init__(self, memoria_objetos, queue_comunicacao):
+    def __init__(self, memoria_objetos, queue_comunicacao, ctx):
         self.memoria_objetos = memoria_objetos
         self.queue_comunicacao = queue_comunicacao
+        self.ctx = ctx  # Contexto da página principal do Streamlit
         self.tempo_visto_com_objetos = 0
         self.ultimo_tempo = time.time()
 
@@ -82,7 +83,7 @@ class VideoProcessor(VideoProcessorBase):
         
         agora = time.time()
         dt = agora - self.ultimo_tempo
-        self.ultimo_tempo = agora
+        self.ultimo_tempo = manager = agora
 
         results = yolo_model(img, verbose=False)
         objetos_no_frame = set()
@@ -100,9 +101,13 @@ class VideoProcessor(VideoProcessorBase):
             self.tempo_visto_com_objetos += dt
             if self.tempo_visto_com_objetos > 2.0:
                 self.memoria_objetos.update(itens_novos)
-                # Adiciona na fila segura
                 self.queue_comunicacao.put(itens_novos)
                 self.tempo_visto_com_objetos = 0
+                
+                # O SEGREDO: Força o Streamlit a atualizar a interface imediatamente na detecção
+                if self.ctx:
+                    from streamlit.runtime.scriptrunner import ScriptRunner
+                    ScriptRunner(self.ctx).request_rerun()
         else:
             self.tempo_visto_com_objetos = 0
 
@@ -111,11 +116,15 @@ class VideoProcessor(VideoProcessorBase):
 # 4. Interface Gráfica Web (Layout de duas colunas)
 col1, col2 = st.columns(2)
 
+# Captura de forma segura o contexto de execução do navegador do usuário
+from streamlit.runtime.scriptrunner import get_script_run_ctx
+contexto_navegador = get_script_run_ctx()
+
 with col1:
     st.subheader("📷 Feed de Vídeo em Tempo Real")
-    ctx = webrtc_streamer(
+    webrtc_streamer(
         key="ia-boas-vindas",
-        video_processor_factory=lambda: VideoProcessor(memoria_global_objetos, objeto_queue),
+        video_processor_factory=lambda: VideoProcessor(memoria_global_objetos, objeto_queue, contexto_navegador),
         media_stream_constraints={"video": True, "audio": False},
     )
 
@@ -134,7 +143,7 @@ with col2:
         st.success("Memória limpa!")
         st.rerun()
 
-    # 5. Processamento Síncrono e Seguro disparado pela Fila (SEM loops de autorefresh)
+    # 5. Processamento Síncrono Acionado pelo Gatilho da Câmera
     if not objeto_queue.empty():
         itens_detectados = objeto_queue.get()
         
@@ -149,16 +158,13 @@ with col2:
             loop.close()
             
             st.session_state["tocar_audio"] = True
-        
-        # Força uma única atualização limpa na tela após processar o Gemini
-        st.rerun()
 
-    # Exibe o texto explicativo de forma estável na tela (sem piscar)
+    # Renderiza o texto gerado de forma estática e fixa
     if st.session_state["texto_ia"]:
         st.info(st.session_state["texto_ia"])
     else:
         st.write("Aguardando detecção de novos objetos...")
 
-    # Se houver áudio pronto, renderiza o player nativo do navegador
+    # Se houver áudio pronto, renderiza o player nativo
     if st.session_state["tocar_audio"] and os.path.exists("resposta_estavel.mp3"):
         st.audio("resposta_estavel.mp3", format="audio/mp3", autoplay=True)
