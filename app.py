@@ -9,6 +9,7 @@ import edge_tts
 import os
 import base64
 import threading
+from queue import Queue
 
 # Configuração da página do Streamlit
 st.set_page_config(page_title="IA de Boas-Vindas Contextual", layout="wide")
@@ -17,12 +18,12 @@ st.title("🤖 IA de Boas-Vindas Contextual com YOLOv8 e Gemini")
 # Silencia logs do OpenCV
 os.environ["QT_LOGGING_RULES"] = "*.debug=false;*.info=false;*.warning=false"
 
-# 1. Recursos Estáticos Persistentes para controle de falas
+# 1. Recursos Estáticos Persistentes e Fila Compartilhada
 @st.cache_resource
-def obter_memoria_global():
-    return set()  # Guarda o histórico para NUNCA repetir o mesmo objeto no dia
+def obter_recursos_globais():
+    return set(), Queue()  # Memória de objetos e Fila segura de interface
 
-memoria_global_objetos = obter_memoria_global()
+memoria_global_objetos, interface_queue = obter_recursos_globais()
 
 # Inicialização das variáveis normais de interface
 if "texto_ia" not in st.session_state:
@@ -53,11 +54,15 @@ def obter_frase_criativa(lista_objetos):
     Regra crucial: Faça um comentário detalhado, desenvolva bem o assunto sobre os itens trazidos e conclua com uma afirmação acolhedora. Escreva um parágrafo completo. Devolva APENAS o texto a ser falado.
     Proibição: Não faça nenhuma pergunta no final e não utilize pontos de interrogação.
     """
-    try:
-        resposta = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
-        return resposta.text.strip()
-    except Exception:
-        return "Olá! Que bom que você chegou. Seja bem-vindo de volta! Deixe suas coisas na entrada e fique à vontade para descansar."
+    tentativas = 3
+    for i in range(tentativas):
+        try:
+            resposta = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+            return resposta.text.strip()
+        except Exception:
+            if i == tentativas - 1:
+                return "Olá! Que bom que você chegou. Seja bem-vindo de volta! Deixe suas coisas na entrada e fique à vontade para descansar."
+            time.sleep(1.5)
 
 async def gerar_audio_edge(texto, nome_arquivo):
     communicate = edge_tts.Communicate(texto, "pt-BR-FranciscaNeural")
@@ -76,7 +81,7 @@ def transformar_audio_em_html(caminho_arquivo):
     """
 
 def pipeline_processamento_ia(itens):
-    """Executa a geração de inteligência artificial em segundo plano"""
+    """Executa em segundo plano e joga os resultados na fila de interface segura"""
     try:
         frase = obter_frase_criativa(itens)
         nome_arquivo = f"resposta_{int(time.time())}.mp3"
@@ -88,9 +93,8 @@ def pipeline_processamento_ia(itens):
         
         tag_html = transformar_audio_em_html(nome_arquivo)
         
-        # Salva o resultado direto nas variáveis de sessão para exibição segura
-        st.session_state["texto_ia"] = frase
-        st.session_state["audio_html"] = tag_html
+        # JOGA NA FILA em vez de tentar gravar direto no session_state
+        interface_queue.put((frase, tag_html))
         
         if os.path.exists(nome_arquivo):
             try: os.remove(nome_arquivo)
@@ -98,13 +102,13 @@ def pipeline_processamento_ia(itens):
     except Exception as e:
         print(f"[Erro Background]: {e}")
 
-# 3. Classe Processadora Nativa do WebRTC (Thread-safe através de atributos de instância)
+# 3. Classe Processadora Nativa do WebRTC
 class VideoProcessor(VideoProcessorBase):
     def __init__(self, memoria_objetos):
         self.memoria_objetos = memoria_objetos
         self.tempo_visto_com_objetos = 0
         self.ultimo_tempo = time.time()
-        self.novos_itens_compartilhados = None  # Canal limpo de comunicação externa
+        self.novos_itens_compartilhados = None
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
@@ -129,7 +133,6 @@ class VideoProcessor(VideoProcessorBase):
             self.tempo_visto_com_objetos += dt
             if self.tempo_visto_com_objetos > 2.0:
                 self.memoria_objetos.update(itens_novos)
-                # Guarda o dado diretamente no atributo da classe, visível para a interface
                 self.novos_itens_compartilhados = itens_novos
                 self.tempo_visto_com_objetos = 0
         else:
@@ -142,7 +145,6 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("📷 Feed de Vídeo em Tempo Real")
-    # Capturamos o contexto do WebRTC streamer na variável ctx
     ctx = webrtc_streamer(
         key="ia-boas-vindas",
         video_processor_factory=lambda: VideoProcessor(memoria_global_objetos),
@@ -159,35 +161,38 @@ with col2:
         st.success("Memória de objetos limpa!")
         st.rerun()
 
-    # Contêiner onde os textos e avisos serão desenhados dinamicamente
-    area_resposta_ia = st.empty()
-
-    # 5. O SEGREDO DO FUNCIONAMENTO: Varredura contínua e nativa do estado da câmera
+    # 5. Monitoramento contínuo do contexto da câmera
     if ctx.video_processor:
-        # Verifica diretamente se a propriedade interna da instância da câmera mudou
         if ctx.video_processor.novos_itens_compartilhados is not None:
             itens_detectados = ctx.video_processor.novos_itens_compartilhados
-            ctx.video_processor.novos_itens_compartilhados = None  # Limpa o gatilho na hora
+            ctx.video_processor.novos_itens_compartilhados = None  # Limpa o gatilho
             
-            with area_resposta_ia.container():
-                with st.spinner("IA Pensando em uma interação..."):
-                    # Executa a geração em uma thread para não engasgar os quadros da webcam
-                    t = threading.Thread(target=pipeline_processamento_ia, args=(itens_detectados,))
-                    t.start()
-                    t.join()  # Sincroniza o fim do processamento do texto/áudio antes de desenhar a tela
-            st.rerun()
+            # Resgata o contexto atual para injetar na thread
+            from streamlit.runtime.scriptrunner import get_script_run_ctx, add_script_run_ctx
+            ctx_sessao = get_script_run_ctx()
+            
+            # Dispara a thread passando o contexto de renderização correto
+            t = threading.Thread(target=pipeline_processamento_ia, args=(itens_detectados,))
+            add_script_run_ctx(t, ctx_sessao)  # Vincula a thread à tela do navegador!
+            t.start()
+
+    # 6. Captura os dados da Fila de interface com segurança
+    if not interface_queue.empty():
+        frase_pronta, html_pronto = interface_queue.get()
+        st.session_state["texto_ia"] = frase_pronta
+        st.session_state["audio_html"] = html_pronto
+        st.rerun()
 
     # Desenha o resultado estável na interface web
-    with area_resposta_ia.container():
-        if st.session_state["texto_ia"]:
-            st.info(st.session_state["texto_ia"])
-        else:
-            st.write("Aguardando detecção de novos objetos...")
+    if st.session_state["texto_ia"]:
+        st.info(st.session_state["texto_ia"])
+    else:
+        st.write("Aguardando detecção de novos objetos...")
 
-        if st.session_state["audio_html"]:
-            st.markdown(st.session_state["audio_html"], unsafe_allow_html=True)
-            st.session_state["audio_html"] = ""  # Consome a tag
+    if st.session_state["audio_html"]:
+        st.markdown(st.session_state["audio_html"], unsafe_allow_html=True)
+        st.session_state["audio_html"] = ""  # Consome a tag
 
-# 6. Atualizador ultra leve de interface (Diz para a tela ler o ctx da câmera a cada 1 segundo)
+# 7. Atualizador leve de interface (Diz para a tela ler as novidades a cada 1 segundo)
 from streamlit_autorefresh import st_autorefresh
 st_autorefresh(interval=1000, key="atualizador_de_interface_nuvem")
