@@ -8,6 +8,7 @@ import asyncio
 import edge_tts
 import os
 import base64
+from queue import Queue
 
 # Configuração da página do Streamlit
 st.set_page_config(page_title="IA de Boas-Vindas Contextual", layout="wide")
@@ -16,10 +17,9 @@ st.title("🤖 IA de Boas-Vindas Contextual com YOLOv8 e Gemini")
 # Silencia logs do OpenCV
 os.environ["QT_LOGGING_RULES"] = "*.debug=false;*.info=false;*.warning=false"
 
-# 1. Recursos Globais em Cache (Fila de mensageria e memória de curto prazo)
+# 1. Recursos Globais em Cache Estático
 @st.cache_resource
 def obter_recursos_globais():
-    from queue import Queue
     return Queue(), set(), {"tempo_visto": 0, "ultimo_tempo": time.time()}
 
 objeto_queue, memoria_global_objetos, cronometro = obter_recursos_globais()
@@ -30,7 +30,7 @@ if "texto_ia" not in st.session_state:
 if "audio_html" not in st.session_state:
     st.session_state["audio_html"] = ""
 
-# 3. Configuração Segura da API Key (Puxando dos Secrets da Nuvem)
+# 3. Configuração Segura da API Key
 try:
     MINHA_API_KEY = st.secrets["GEMINI_API_KEY"]
     client = genai.Client(api_key=MINHA_API_KEY)
@@ -45,7 +45,6 @@ def load_yolo():
 yolo_model = load_yolo()
 
 def obter_frase_criativa(lista_objetos):
-    """Solicita a interação para o Gemini com Retry automático"""
     prompt = f"""
     Você é uma inteligência artificial de boas-vindas instalada na entrada de uma casa.
     Uma pessoa acabou de chegar trazendo os seguintes objetos inéditos que você ainda não tinha visto hoje: {lista_objetos}.
@@ -65,12 +64,10 @@ def obter_frase_criativa(lista_objetos):
             time.sleep(1.5)
 
 async def gerar_audio_edge(texto):
-    """Gera o arquivo temporário de áudio"""
     communicate = edge_tts.Communicate(texto, "pt-BR-FranciscaNeural")
     await communicate.save("resposta_web.mp3")
 
 def transformar_audio_em_html(caminho_arquivo):
-    """Codifica o áudio em Base64 para tocar nativamente no navegador do cliente"""
     with open(caminho_arquivo, "rb") as f:
         data = f.read()
     b64 = base64.b64encode(data).decode()
@@ -104,7 +101,7 @@ def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
         cronometro["tempo_visto"] += dt
         if cronometro["tempo_visto"] > 2.0:
             memoria_global_objetos.update(itens_novos)
-            objeto_queue.put(itens_novos)
+            objeto_queue.put(itens_novos)  # Despacha o objeto para a fila
             cronometro["tempo_visto"] = 0
     else:
         cronometro["tempo_visto"] = 0
@@ -132,23 +129,25 @@ with col2:
         st.success("Memória de objetos limpa!")
         st.rerun()
 
-    # 6. Escuta a fila e processa as chamadas de IA fora da thread de vídeo
+    # Contêiner dinâmico que permite atualizar o status sem travar a interface
+    status_placeholder = st.empty()
+
+    # 6. Monitor de Fila Ativo na Interface Principal
     if not objeto_queue.empty():
         itens_para_processar = objeto_queue.get()
         
-        with st.spinner("IA Pensando em uma interação..."):
-            frase = obter_frase_criativa(itens_para_processar)
-            st.session_state["texto_ia"] = frase
-            
-            # Executa o Edge-TTS de forma isolada
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(gerar_audio_edge(frase))
-            loop.close()
-            
-            # Gera a tag HTML de reprodução do áudio
-            if os.path.exists("resposta_web.mp3"):
-                st.session_state["audio_html"] = transformar_audio_em_html("resposta_web.mp3")
+        with status_placeholder.container():
+            with st.spinner("IA Pensando em uma interação..."):
+                frase = obter_frase_criativa(itens_para_processar)
+                st.session_state["texto_ia"] = frase
+                
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(gerar_audio_edge(frase))
+                loop.close()
+                
+                if os.path.exists("resposta_web.mp3"):
+                    st.session_state["audio_html"] = transformar_audio_em_html("resposta_web.mp3")
         st.rerun()
 
     # Exibe o parágrafo de texto gerado
@@ -160,4 +159,8 @@ with col2:
     # Se houver áudio pendente, ele é injetado e executado pelo navegador
     if st.session_state["audio_html"]:
         st.markdown(st.session_state["audio_html"], unsafe_allow_html=True)
-        st.session_state["audio_html"] = ""  # Consome o áudio para evitar loops
+        st.session_state["audio_html"] = ""
+
+# 7. Força a UI do Streamlit a acordar e ler a fila a cada 1 segundo em paralelo com o vídeo
+from streamlit_autorefresh import st_autorefresh
+st_autorefresh(interval=1000, key="atualizador_de_fila_nuvem")
